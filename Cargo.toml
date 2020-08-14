@@ -1,0 +1,13 @@
+[package]
+name = "g815-driver"
+version = "0.1.0"
+authors = ["Sam Lavers <sam@lave.rs>"]
+edition = "2018"
+links = "X11"
+build = "build.rs"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+x11 = "2.18"
+hidapi = "1.2.0"
