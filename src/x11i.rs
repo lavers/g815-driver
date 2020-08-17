@@ -20,6 +20,13 @@ pub enum GetWindowPropertyError
 	BadValue
 }
 
+pub struct ActiveWindowInfo
+{
+	pub pid: Option<i32>,
+	pub title: Option<String>,
+	pub executable: Option<String>
+}
+
 pub struct X11Interface
 {
 	display: *mut Display
@@ -36,6 +43,24 @@ impl X11Interface
 				display: XOpenDisplay(ptr::null())
 			}
 		}
+	}
+
+	pub fn get_active_window_info(&self) -> Option<ActiveWindowInfo>
+	{
+		self.get_active_window()
+			.map(|window| 
+			{
+				let pid = self.get_window_pid(window).unwrap_or(None);
+
+				ActiveWindowInfo
+				{
+					pid,
+					title: self.get_window_name(window).unwrap_or(None),
+					executable: pid
+						.and_then(|pid| std::fs::read_link(format!("/proc/{}/exe", pid)).ok())
+						.map(|exe_path| exe_path.to_string_lossy().into())
+				}
+			})
 	}
 
 	pub fn get_active_window(&self) -> Option<Window>
@@ -79,7 +104,7 @@ impl X11Interface
 				{
 					let window_name = CStr::from_ptr(data as *mut c_char)
 						.to_string_lossy()
-						.into_owned();
+						.into();
 					XFree(data as *mut c_void);
 					window_name
 				}))

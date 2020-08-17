@@ -82,7 +82,7 @@ close of ghub and return to hardware mode
 11 ff 0f 5a
 11 ff 11 1a 01
 >> 02
-11 ff 0a 2a
+11 ff 0a 2a # disable g-keys custom mode?
 >> 01
 >> 03
 >> 00
@@ -197,4 +197,32 @@ some sort of enumeration on startup:
 startup process
 
 11 ff 00 0a [2 byte feature id]		feature request
+
+
+
+
+
+
+0f = lighting related feature?
+
+entering hardware mode 
+
+0f 5a
+0f 5a 01
+0f 3a 00 00 01
+0f 0a ff 00 01
+// large sequence of writes? 0a is usually get/set data
+
+entering software mode
+
+0f 5a
+0f 5a 01 03 07
+0f 7a 01
+// set effects with 0f 1a
+0f 5a 01 03 03
+0f 5a 01 03 05
+0f 5a 01 03 05
+0f 3a 00 00 01
+// more 0f 0a stuff
+0f 5a 01 03 03
 
