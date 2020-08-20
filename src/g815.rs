@@ -1,13 +1,16 @@
 use hidapi::{HidApi, HidDevice, HidResult, HidError};
 
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex, MutexGuard};
+
+use crate::{KeyboardState, DeviceEvent, KeyType, MediaKey};
 
 static VID: u16 = 0x046d;
 static PID: u16 = 0xc33f;
 
 enum Command
 {
-	ActivateMode = 0x0b1a, // followed by bitmask of mode key
+	SetModeLeds = 0x0b1a, // followed by bitmask of mode key
 	Set13 = 0x106a, // followed by r, g, b, [13 keycodes]
 	Set4 = 0x101a, // followed by keycode, r, g, b, [ff terminator if < 4]
 	SetEffect = 0x0f1a, // followed by group, effect, r, g, b, [period h..l], [00..00..01]
@@ -19,35 +22,59 @@ enum Command
 	SetGKeysMode = 0x0a2a, // 00 G-keys in F-key mode, 01 in software mode
 	GetVersion = 0x021a,
 	CapabilityInfo = 0x000a, // OR this with (capabilityid << 8) to get capability info, or 00 to get capability id
-	LightingEnabled = 0xf7a
+	LightingEnabled = 0x0f7a,
+	MediaKeysEnabled = 0x0f3a
 }
 
 #[derive(PartialEq, Eq, Hash, Copy, Clone)]
 pub enum Capability
 {
 	GKeys = 0x8010, // usual id = 0x0a
-	ModeKeys = 0x8020, // usual id = 0x0b
-	RecordMacroKey = 0x8030, // usual id = 0x0c
-	BrightnessKey = 0x8040, // usual id = 0x0d
-	GameModeKey = 0x4522, // usual id = 0x08
+	ModeSwitching = 0x8020, // usual id = 0x0b
+	MacroRecording = 0x8030, // usual id = 0x0c
+	BrightnessAdjustment = 0x8040, // usual id = 0x0d
+	GameMode = 0x4522, // usual id = 0x08
 
 	// not sure what this one is but it's id (0xf) often comes around setting up lighting
 	SomethingLightingRelated = 0x8071 
 }
 
-enum ControlMode
+#[derive(Debug)]
+pub struct CapabilityData
+{
+	id: u8,
+	key_type: Option<KeyType>,
+	key_count: Option<u8>,
+	raw: Option<Vec<u8>>
+}
+
+impl CapabilityData
+{
+	pub fn no_capability() -> Self
+	{
+		CapabilityData
+		{
+			id: 0,
+			key_type: None,
+			key_count: None,
+			raw: None
+		}
+	}
+}
+
+pub enum ControlMode
 {
 	Hardware = 0x01,
 	Software = 0x02
 }
 
-enum GKeysMode
+pub enum GKeysMode
 {
 	Default = 0x00,
 	Software = 0x01
 }
 
-enum EffectGroup
+pub enum EffectGroup
 {
 	Logo = 0x00,
 	Keys = 0x01
@@ -87,8 +114,9 @@ pub type CommandResult<T> = Result<T, CommandError>;
 
 pub struct G815Keyboard
 {
-	device: HidDevice,
-	capability_ids: HashMap<Capability, u8>
+	device: Mutex<HidDevice>,
+	capabilities: HashMap<Capability, CapabilityData>,
+	capability_id_cache: HashMap<u8, Capability>
 }
 
 pub struct Color
@@ -122,8 +150,9 @@ impl G815Keyboard
 			.and_then(|dev_info| dev_info.open_device(&hidapi))
 			.map(|device| G815Keyboard 
 			{
-				device, 
-				capability_ids: HashMap::new() 
+				device: Mutex::new(device), 
+				capabilities: HashMap::new(),
+				capability_id_cache: HashMap::new()
 			})
 	}
 
@@ -139,25 +168,48 @@ impl G815Keyboard
 		buffer.extend(data);
 		buffer.resize(20, 0);
 
-		println!("executing: {:x?}", &buffer);
+		let mut expected_return = [0; 4];
+		expected_return.clone_from_slice(&buffer[..4]);
 
-		self.device.write(&buffer)?;
+		// no idea why but this command (something to do with enabling media keys)
+		// seems to be the only one that doesn't send a mirrored ACK back, so we 
+		// have to watch out for it specifically
 
-		buffer.clear();
-		buffer.resize(20, 0);
+		if command == Command::MediaKeysEnabled as u16
+		{
+			expected_return[2] = 0xff;
+			expected_return[3] = 0x0f;
+		}
 
-		let bytes_read = self.device.read(&mut buffer)?;
+		let device = self.device.lock().unwrap();
 
-		buffer.truncate(bytes_read);
+		device.set_blocking_mode(true)?;
+		device.write(&buffer)?;
 
-		println!("received ({} bytes): {:x?}", bytes_read, &buffer);
+		println!("OUT(20) > {:0x?}", &buffer);
 
-		buffer.drain(0..std::cmp::min(bytes_read, 4));
+		for _ in 0..100
+		{
+			buffer.clear();
+			buffer.resize(20, 0);
+			let bytes_read = device.read(&mut buffer)?;
+			buffer.truncate(bytes_read);
 
-		// TODO compare removed elements against 11 ff <command> to make sure we got a
-		// reply to what we sent..?
+			if bytes_read >= 4 && expected_return == &buffer[..4]
+			{
+				println!("ACK({:2}) > {:0x?}", bytes_read, &buffer);
 
-		Ok(buffer)
+				buffer.drain(0..std::cmp::min(bytes_read, 4));
+				device.set_blocking_mode(false)?;
+				return Ok(buffer);
+			}
+			else
+			{
+				println!("IN ({:2}) > {:0x?}", bytes_read, &buffer);
+			}
+		}
+
+		panic!("device sent 10 interrupts that seem to be nonsense");
 	}
 
 	fn execute(&self, command: Command, data: &[u8]) -> CommandResult<Vec<u8>>
@@ -177,38 +229,90 @@ impl G815Keyboard
 		Ok(format!("{}: {}.{}.{}", name.trim(), major, minor, build).to_string())
 	}
 
-	fn capability_id(&mut self, capability: Capability) -> CommandResult<u8>
+	pub fn capability_data(&self, capability: Capability) -> CommandResult<&CapabilityData>
 	{
-		let id = capability as u16;
-
-		self
-			.execute(Command::CapabilityInfo, &vec![(id >> 8) as u8, id as u8])
-			.map(|data| 
-			{
-				let capability_id = data[0];
-				self.capability_ids.insert(capability, capability_id);
-				capability_id
-			})
+		match self.capabilities.get(&capability)
+		{
+			Some(capability_data) => Ok(capability_data),
+			None => Err(CommandError::LogicError(format!(
+				"attempt to get capability_data for non initialized capability '{}'",
+				capability as u8)))
+		}
 	}
 
-	pub fn capability_data(&mut self, capability: Capability) -> CommandResult<Vec<u8>>
+	pub fn load_capabilities(&mut self) -> CommandResult<()>
 	{
-		let capability_id = match self.capability_ids.get(&capability)
+		let capabilities = vec![
+			Capability::GKeys,
+			Capability::ModeSwitching,
+			Capability::GameMode,
+			Capability::MacroRecording,
+			Capability::BrightnessAdjustment
+		];
+
+		capabilities
+			.iter()
+			.map(|capability| self.load_capability_data(*capability).map(|_| ()))
+			.collect()
+	}
+
+	pub fn load_capability_data(&mut self, capability: Capability) -> CommandResult<&CapabilityData>
+	{
+		let id_result = self.execute(
+			Command::CapabilityInfo, 
+			&vec![((capability as u16) >> 8) as u8, capability as u8])?;
+
+		let capability_data = match id_result[0]
 		{
-			Some(capability_id) => *capability_id,
-			None => self.capability_id(capability)?
-		} as u16;
+			0 => CapabilityData::no_capability(),
+			capability_id => 
+			{
+				let data_command = ((capability_id as u16) << 8) | (Command::CapabilityInfo as u16);
+				let data = self.write(data_command, &[0; 0])?;
+				let mut cap_data = CapabilityData
+				{
+					id: capability_id,
+					raw: None,
+					key_count: match capability
+					{
+						Capability::GKeys => Some(data[0]),
+						Capability::ModeSwitching => Some(data[0]),
+						Capability::GameMode => Some(1),
+						Capability::MacroRecording => Some(1),
+						Capability::BrightnessAdjustment => Some(1),
+						_ => None
+					},
+					key_type: match capability 
+					{
+						Capability::GKeys => Some(KeyType::GKey),
+						Capability::ModeSwitching => Some(KeyType::Mode),
+						Capability::GameMode => Some(KeyType::GameMode),
+						Capability::MacroRecording => Some(KeyType::MacroRecord),
+						Capability::BrightnessAdjustment => Some(KeyType::Light),
+						_ => None
+					}
+				};
 
-		let command = (capability_id << 8) | (Command::CapabilityInfo as u16);
+				cap_data.raw = Some(data);
+				cap_data
+			}
+		};
 
-		self.write(command, &[0; 0])
+		self.capability_id_cache.insert(capability_data.id, capability);
+
+		let data_ref = self.capabilities
+			.entry(capability)
+			.insert(capability_data)
+			.into_mut();
+
+		Ok(data_ref)
 	}
 
 	pub fn has_capability(&self, capability: Capability) -> bool
 	{
-		match self.capability_ids.get(&capability)
+		match self.capabilities.get(&capability)
 		{
-			Some(capability_id) => *capability_id > 0,
+			Some(data) => data.id > 0,
 			None => false
 		}
 	}
@@ -251,9 +355,10 @@ impl G815Keyboard
 		self.execute(Command::Commit, &[0; 0]).map(|_| ())
 	}
 
-	pub fn activate_mode(&self, mode: u8) -> CommandResult<()>
+	pub fn set_mode(&self, mode: u8) -> CommandResult<()>
 	{
-		self.execute(Command::ActivateMode, &[mode; 1]).map(|_| ())
+		let mask = 1 << (mode - 1);
+		self.execute(Command::SetModeLeds, &[mask; 1]).map(|_| ())
 	}
 
 	pub fn set_control_mode(&self, mode: ControlMode) -> CommandResult<()>
@@ -290,65 +395,138 @@ impl G815Keyboard
 		]).map(|_| ())
 	}
 
-	fn consume_interrupts(&mut self, count: u8) -> CommandResult<()>
-	{
-		let mut buffer = [0; 20];
-
-		for i in 0..count
-		{
-			self.device.read(&mut buffer)?;
-			println!("discarding: {:x?}", &buffer);
-		}
-
-		Ok(())
-	}
-
 	fn solid_color(&self, group: EffectGroup, color: Color) -> CommandResult<()>
 	{
 		self.set_effect(group, 1, color, 0x2000)
 	}
 
-	pub fn take_control(&mut self) -> CommandResult<()>
+	pub fn take_control(&self) -> CommandResult<()>
 	{
 		self.set_control_mode(ControlMode::Software)?;
-		self.consume_interrupts(1)?;
 		self.set_gkeys_mode(GKeysMode::Software)?;
-		self.consume_interrupts(5)?;
-		self.activate_mode(1)?;
-		self.consume_interrupts(2)?;
+		self.set_mode(1)?;
+		self.write(0x0f5a, &vec![])?;
+		self.write(0x0f5a, &vec![01, 03, 07])?;
+		self.write(Command::LightingEnabled as u16, &vec![1])?;
 		self.solid_color(EffectGroup::Keys, Color::new(255, 0, 0))?;
 		self.solid_color(EffectGroup::Logo, Color::new(0, 0, 255))?;
-		self.write(0x0f7a, &vec![1]).map(|_| ())
-		//self.write(0x0f5a, &vec![1, 3, 3]).map(|_| ())
+		self.write(0x0f5a, &vec![01, 03, 03])?;
+		self.set_macro_record_mode(MacroRecordMode::Default)?;
+		self.write(0x0f5a, &vec![01, 03, 05])?;
+		self.write(Command::MarkStart as u16, &vec![])?;
+		self.write(0x0f5a, &vec![01, 03, 05])?;
+		self.write(Command::MarkEnd as u16, &vec![]).map(|_| ())
+		//self.write(Command::MediaKeysEnabled as u16, &vec![00, 00, 01])?;
+
+		//self.write(0x0f5a, &vec![01, 03, 03]).map(|_| ())
 	}
 
-	pub fn release_control(&mut self) -> CommandResult<()>
+	pub fn release_control(&self) -> CommandResult<()>
 	{
 		self.set_gkeys_mode(GKeysMode::Default)?;
-		self.consume_interrupts(4)?;
-		self.set_control_mode(ControlMode::Hardware)?;
-		self.consume_interrupts(2)
+		self.set_control_mode(ControlMode::Hardware)
 	}
 
-	pub fn interrupt_watch(&mut self, duration: std::time::Duration)
+	pub fn poll_for_events(&self, state: &Arc<Mutex<KeyboardState>>) -> Vec<DeviceEvent>
 	{
-		let start = std::time::Instant::now();
-		self.device.set_blocking_mode(false);
+		let mut buffer = [0; 20];
+		let bytes_read = self.device.lock().unwrap().read(&mut buffer).unwrap_or(0);
+		let mut state = state.lock().unwrap();
 
-		while start.elapsed() < duration
+		if bytes_read < 1
 		{
-			let bytes_read = self.device.read(&mut self.scratch_buffer).unwrap();
-
-			if bytes_read > 0
-			{
-				println!("interrupt {:0x?}", &self.scratch_buffer);
-			}
-
-			std::thread::sleep(std::time::Duration::from_millis(1));
+			return Vec::new()
 		}
 
-		self.device.set_blocking_mode(true);
+		// media key interrupt
 
-		println!("done")
+		if buffer[0] == 0x03
+		{
+			return self.handle_media_key_interrupt(&mut state, buffer[1])
+		}
+
+		// if it's not a media key or a capability key then ignore it
+		// note: 11 ff 0f 10 [00/01] comes up a lot but idk what it means
+
+		if buffer[0] != 0x11 || buffer[1] != 0xff
+		{
+			return Vec::new()
+		}
+
+		match self.capability_id_cache.get(&buffer[2])
+		{
+			Some(capability) => self.handle_capability_key_interrupt(*capability, &mut state, &buffer[4..]),
+			None => Vec::new()
+		}
+	}
+
+	fn handle_media_key_interrupt(&self, state: &mut MutexGuard<KeyboardState>, current_bitmask: u8)
+		-> Vec<DeviceEvent>
+	{
+		let previous_bitmask = *state.key_bitmasks.get(&KeyType::MediaControl).unwrap_or(&0);
+		let diff_mask = previous_bitmask ^ current_bitmask;
+		state.key_bitmasks.insert(KeyType::MediaControl, current_bitmask);
+
+		(0..7)
+			.filter_map(|i| (match 1 << i
+			{
+				0x01 => Some(MediaKey::PlayPause),
+				0x02 => Some(MediaKey::Previous),
+				0x08 => Some(MediaKey::Next),
+				0x10 => Some(MediaKey::VolumeUp),
+				0x20 => Some(MediaKey::VolumeDown),
+				0x40 => Some(MediaKey::Mute),
+				_ => None
+			}).map(|key| (i, key)))
+			.filter_map(|(i, key)| match (diff_mask >> i) & 0x1 == 0x1
+			{
+				true => Some(match (current_bitmask >> i) & 0x1 == 0x1
+				{
+					true => DeviceEvent::MediaKeyDown(key),
+					false => DeviceEvent::MediaKeyUp(key)
+				}),
+				false => None
+			})
+			.collect()
+	}
+
+	fn handle_capability_key_interrupt(&self, 
+	   capability: Capability, 
+	   state: &mut MutexGuard<KeyboardState>, 
+	   data: &[u8])
+		-> Vec<DeviceEvent>
+	{
+		let capability_data = self.capability_data(capability).unwrap();
+		let key_type = capability_data.key_type.unwrap();
+
+		match key_type
+		{
+			KeyType::Light => vec![DeviceEvent::BrightnessLevelChanged(data[1])],
+			KeyType::GKey 
+				| KeyType::GameMode 
+				| KeyType::MacroRecord 
+				| KeyType::Mode => 
+			{
+				let current_bitmask = data[0];
+				let previous_bitmask = state.key_bitmasks.get(&key_type).unwrap_or(&0);
+
+				let diff_mask = previous_bitmask ^ current_bitmask;
+				let changes = (0..capability_data.key_count.unwrap())
+					.filter_map(|i| match (diff_mask >> i) & 0x1 == 0x1
+					{
+						false => None,
+						true => Some(match (current_bitmask >> i) & 0x1 == 0x1
+						{
+							false => DeviceEvent::KeyUp(key_type, i + 1),
+							true => DeviceEvent::KeyDown(key_type, i + 1)
+						})
+					})
+					.collect();
+
+				state.key_bitmasks.insert(key_type, current_bitmask);
+				changes
+			},
+			_ => Vec::new()
+		}
 	}
 }

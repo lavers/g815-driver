@@ -1,36 +1,45 @@
 use std::convert::TryFrom;
-use std::os::raw::{c_ulong, c_long, c_int, c_uchar, c_char, c_void};
+use std::os::raw::{c_long, c_ulong, c_int, c_uint, c_char, c_uchar, c_void};
 use std::ffi::{CStr, CString};
 use std::ptr;
+use std::time::Duration;
+use std::sync::Mutex;
 
-use x11::xlib::{
-	Display,
-	Window,
-	XOpenDisplay, 
-	XInternAtom, 
-	XDefaultRootWindow, 
-	XGetWindowProperty, 
-	XFree};
+use x11::{xlib, xtest};
+use x11::xlib::{Display, Window, KeyCode, XFree};
 
 #[derive(Debug)]
 pub enum GetWindowPropertyError
 {
 	BadWindow,
 	BadAtom,
-	BadValue
+	BadValue,
+	UnknownError
 }
 
 pub struct ActiveWindowInfo
 {
 	pub pid: Option<i32>,
 	pub title: Option<String>,
-	pub executable: Option<String>
+	pub executable: Option<String>,
+	pub class_hint: Option<WindowClassHint>
+}
+
+pub struct WindowClassHint
+{
+	pub name: String,
+	pub class: String
 }
 
 pub struct X11Interface
 {
-	display: *mut Display
+	display: Mutex<*mut Display>,
+	min_keycode: KeyCode,
+	max_keycode: KeyCode
 }
+
+unsafe impl Send for X11Interface {}
+unsafe impl Sync for X11Interface {}
 
 impl X11Interface
 {
@@ -38,9 +47,19 @@ impl X11Interface
 	{
 		unsafe
 		{
+			let display = xlib::XOpenDisplay(ptr::null());
+
+			let mut min_keycode = 0;
+			let mut max_keycode = 0;
+			xlib::XDisplayKeycodes(display, &mut min_keycode, &mut max_keycode);
+			
 			X11Interface
 			{
-				display: XOpenDisplay(ptr::null())
+				display: Mutex::new(display),
+				// the X11 spec says these are never outside 8..255 so this
+				// cast should be fine
+				min_keycode: min_keycode as KeyCode,
+				max_keycode: max_keycode as KeyCode
 			}
 		}
 	}
@@ -58,7 +77,8 @@ impl X11Interface
 					title: self.get_window_name(window).unwrap_or(None),
 					executable: pid
 						.and_then(|pid| std::fs::read_link(format!("/proc/{}/exe", pid)).ok())
-						.map(|exe_path| exe_path.to_string_lossy().into())
+						.map(|exe_path| exe_path.to_string_lossy().into()),
+					class_hint: self.get_window_class_hint(window).ok()
 				}
 			})
 	}
@@ -67,7 +87,7 @@ impl X11Interface
 	{
 		unsafe
 		{
-			let root_window = XDefaultRootWindow(self.display);
+			let root_window = xlib::XDefaultRootWindow(*self.display.lock().unwrap());
 
 			self.get_window_property(root_window, "_NET_ACTIVE_WINDOW")
 				.ok()
@@ -111,9 +131,47 @@ impl X11Interface
 		}
 	}
 
+	pub fn get_window_class_hint(&self, window: Window) 
+		-> Result<WindowClassHint, GetWindowPropertyError>
+	{
+		unsafe
+		{
+			let display = *self.display.lock().unwrap();
+			let class_hint = xlib::XAllocClassHint();
+			let status = xlib::XGetClassHint(display, window, class_hint);
+
+			if status == 0 || status == xlib::BadWindow as i32
+			{
+				XFree(class_hint as *mut c_void);
+
+				Err(match status
+				{
+				   0 => GetWindowPropertyError::UnknownError,
+				   _ => GetWindowPropertyError::BadWindow
+				})
+			}
+			else
+			{
+				let hint = WindowClassHint
+				{
+					name: CStr::from_ptr((*class_hint).res_name).to_string_lossy().into(),
+					class: CStr::from_ptr((*class_hint).res_class).to_string_lossy().into()
+				};
+
+				XFree((*class_hint).res_name as *mut c_void);
+				XFree((*class_hint).res_class as *mut c_void);
+				XFree(class_hint as *mut c_void);
+
+				Ok(hint)
+			}
+		}
+	}
+
 	pub unsafe fn get_window_property(&self, window: Window, property: &str) 
 		-> Result<Option<*mut c_uchar>, GetWindowPropertyError>
 	{
+		let display = *self.display.lock().unwrap();
+
 		let mut property_type = 0 as c_ulong;
 		let mut format = 0 as c_int;
 		let mut item_count = 0 as c_ulong;
@@ -121,10 +179,10 @@ impl X11Interface
 		let mut result_pointer = ptr::null_mut();
 
 		let property = CString::new(property).unwrap();
-		let property_atom = XInternAtom(self.display, property.as_ptr() as *const i8, 0);
+		let property_atom = xlib::XInternAtom(display, property.as_ptr() as *const i8, 0);
 
-		let status = XGetWindowProperty(
-			self.display, 
+		let status = xlib::XGetWindowProperty(
+			display, 
 			window, 
 			property_atom, 
 			0, // offset
@@ -150,6 +208,129 @@ impl X11Interface
 			status => panic!("status from XGetWindowProperty unknown: {}", status)
 		}
 	}
+
+	pub fn get_unused_keycode(&self) -> Option<KeyCode>
+	{
+		unsafe
+		{
+			let mut symbols_per_keycode = 0;
+
+			let keysyms = xlib::XGetKeyboardMapping(
+				*self.display.lock().unwrap(), 
+				self.min_keycode, 
+				(self.max_keycode - self.min_keycode) as i32,
+				&mut symbols_per_keycode);
+
+			let free_keycode = (self.min_keycode..self.max_keycode)
+				.find(|keycode| 
+				{
+					let offset = (keycode - self.min_keycode) as i32 * symbols_per_keycode;
+
+					(0..symbols_per_keycode)
+						.all(|i| *keysyms.offset((offset + i) as isize) == 0)
+				});
+
+			XFree(keysyms as *mut c_void);
+
+			free_keycode
+		}
+	}
+
+	pub fn key_string_to_symbol(&self, key: &str) -> Option<c_uint>
+	{
+		let key = match key
+		{
+			"alt" => "Alt_L",
+			"ctrl" => "Control_L",
+			"meta" => "Meta_L",
+			"super" => "Super_L",
+			"win" => "Super_L",
+			"shift" => "Shift_L",
+			key => key
+		};
+
+		let key_string = CString::new(key).unwrap();
+
+		unsafe
+		{
+			// obviously don't actually need the display for this call however
+			// we'll aquire the mutex just to be sure we're not going to break
+			// anything as libx11 isn't thread safe
+			let _aquire_mutex = self.display.lock().unwrap();
+			let symbol = xlib::XStringToKeysym(key_string.as_ptr());
+
+			match symbol != x11::xlib::NoSymbol as c_ulong
+			{
+				true => Some(symbol as c_uint),
+				false => None
+			}
+		}
+	}
+
+	pub fn key_combo_to_sequence(&self, combo: &str) -> Option<Vec<c_uint>>
+	{
+		combo
+			.split("+")
+			.map(|key_string| self.key_string_to_symbol(key_string))
+			.collect()
+	}
+
+	/// Simulates the pressing of a given set of KeySym's.
+	///
+	/// Ideally this would take a slice of &[KeySym] however
+	/// all of the KeySym constants are defined as c_uint
+	/// but KeySym is defined as c_ulong for some reason
+	pub fn send_key_sequence(&self, sequence: &[c_uint], pressed: bool, delay: Duration)
+	{
+		unsafe
+		{
+			let mut temporary_keycode = None;
+			let display = *self.display.lock().unwrap();
+
+			for symbol in sequence
+			{
+				let mut keycode = xlib::XKeysymToKeycode(display, (*symbol) as u64);
+
+				if keycode == 0
+				{
+					keycode = *temporary_keycode
+						.get_or_insert(self.get_unused_keycode().unwrap());
+
+					let mut symbol = *symbol as u64;
+					xlib::XChangeKeyboardMapping(display, keycode as i32, 1, &mut symbol, 1);
+					xlib::XSync(display, 0);
+				}
+
+				xtest::XTestFakeKeyEvent(display, keycode as u32, pressed as i32, xlib::CurrentTime);
+				xlib::XSync(display, xlib::False);
+				xlib::XFlush(display);
+
+				if delay.as_micros() > 0
+				{
+					std::thread::sleep(delay);
+				}
+			}
+
+			if let Some(temporary_keycode) = temporary_keycode
+			{
+				let mut symbol = 0;
+				xlib::XChangeKeyboardMapping(display, temporary_keycode as i32, 1, &mut symbol, 1);
+				xlib::XFlush(display);
+			}
+		}
+	}
+
+	pub fn send_key_sequence_press(&self, sequence: &[c_uint])
+	{
+		let duration = Duration::from_millis(6);
+		self.send_key_sequence(sequence, true, duration);
+		self.send_key_sequence(sequence, false, duration);
+	}
+
+	pub fn send_key_press(&self, key: c_uint)
+	{
+		self.send_key_sequence_press(&[key; 1]);
+	}
 }
 
 impl Drop for X11Interface
@@ -158,7 +339,7 @@ impl Drop for X11Interface
 	{
 		unsafe
 		{
-			XFree(self.display as *mut c_void);
+			XFree(*self.display.lock().unwrap() as *mut c_void);
 		}
 	}
 }

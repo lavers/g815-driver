@@ -226,3 +226,8 @@ entering software mode
 // more 0f 0a stuff
 0f 5a 01 03 03
 
+
+
+03 00 volume wheel stopped
+03 10 volume wheel down..?
+03 20 volume wheel up..?
