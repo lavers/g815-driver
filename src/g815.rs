@@ -1,9 +1,9 @@
 use hidapi::{HidApi, HidDevice, HidResult, HidError};
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::Mutex;
 
-use crate::{KeyboardState, DeviceEvent, KeyType, MediaKey};
+use crate::{KeyboardState, DeviceEvent, KeyType, MediaKey, Capability, CapabilityData};
 
 static VID: u16 = 0x046d;
 static PID: u16 = 0xc33f;
@@ -26,41 +26,6 @@ enum Command
 	MediaKeysEnabled = 0x0f3a
 }
 
-#[derive(PartialEq, Eq, Hash, Copy, Clone)]
-pub enum Capability
-{
-	GKeys = 0x8010, // usual id = 0x0a
-	ModeSwitching = 0x8020, // usual id = 0x0b
-	MacroRecording = 0x8030, // usual id = 0x0c
-	BrightnessAdjustment = 0x8040, // usual id = 0x0d
-	GameMode = 0x4522, // usual id = 0x08
-
-	// not sure what this one is but it's id (0xf) often comes around setting up lighting
-	SomethingLightingRelated = 0x8071 
-}
-
-#[derive(Debug)]
-pub struct CapabilityData
-{
-	id: u8,
-	key_type: Option<KeyType>,
-	key_count: Option<u8>,
-	raw: Option<Vec<u8>>
-}
-
-impl CapabilityData
-{
-	pub fn no_capability() -> Self
-	{
-		CapabilityData
-		{
-			id: 0,
-			key_type: None,
-			key_count: None,
-			raw: None
-		}
-	}
-}
 
 pub enum ControlMode
 {
@@ -404,14 +369,13 @@ impl G815Keyboard
 	{
 		self.set_control_mode(ControlMode::Software)?;
 		self.set_gkeys_mode(GKeysMode::Software)?;
+		self.set_macro_record_mode(MacroRecordMode::Default)?;
 		self.set_mode(1)?;
-		self.write(0x0f5a, &vec![])?;
-		self.write(0x0f5a, &vec![01, 03, 07])?;
 		self.write(Command::LightingEnabled as u16, &vec![1])?;
 		self.solid_color(EffectGroup::Keys, Color::new(255, 0, 0))?;
-		self.solid_color(EffectGroup::Logo, Color::new(0, 0, 255))?;
-		self.write(0x0f5a, &vec![01, 03, 03])?;
-		self.set_macro_record_mode(MacroRecordMode::Default)?;
+		self.solid_color(EffectGroup::Logo, Color::new(0, 0, 255)).map(|_| ())
+		//self.write(0x0f5a, &vec![01, 03, 03]).map(|_| ())
+		/*
 		self.write(0x0f5a, &vec![01, 03, 05])?;
 		self.write(Command::MarkStart as u16, &vec![])?;
 		self.write(0x0f5a, &vec![01, 03, 05])?;
@@ -419,6 +383,7 @@ impl G815Keyboard
 		//self.write(Command::MediaKeysEnabled as u16, &vec![00, 00, 01])?;
 
 		//self.write(0x0f5a, &vec![01, 03, 03]).map(|_| ())
+		*/
 	}
 
 	pub fn release_control(&self) -> CommandResult<()>
@@ -427,11 +392,10 @@ impl G815Keyboard
 		self.set_control_mode(ControlMode::Hardware)
 	}
 
-	pub fn poll_for_events(&self, state: &Arc<Mutex<KeyboardState>>) -> Vec<DeviceEvent>
+	pub fn poll_for_events(&self, state: &mut KeyboardState) -> Vec<DeviceEvent>
 	{
 		let mut buffer = [0; 20];
 		let bytes_read = self.device.lock().unwrap().read(&mut buffer).unwrap_or(0);
-		let mut state = state.lock().unwrap();
 
 		if bytes_read < 1
 		{
@@ -442,7 +406,7 @@ impl G815Keyboard
 
 		if buffer[0] == 0x03
 		{
-			return self.handle_media_key_interrupt(&mut state, buffer[1])
+			return self.handle_media_key_interrupt(state, buffer[1])
 		}
 
 		// if it's not a media key or a capability key then ignore it
@@ -455,12 +419,12 @@ impl G815Keyboard
 
 		match self.capability_id_cache.get(&buffer[2])
 		{
-			Some(capability) => self.handle_capability_key_interrupt(*capability, &mut state, &buffer[4..]),
+			Some(capability) => self.handle_capability_key_interrupt(*capability, state, &buffer[4..]),
 			None => Vec::new()
 		}
 	}
 
-	fn handle_media_key_interrupt(&self, state: &mut MutexGuard<KeyboardState>, current_bitmask: u8)
+	fn handle_media_key_interrupt(&self, state: &mut KeyboardState, current_bitmask: u8)
 		-> Vec<DeviceEvent>
 	{
 		let previous_bitmask = *state.key_bitmasks.get(&KeyType::MediaControl).unwrap_or(&0);
@@ -492,7 +456,7 @@ impl G815Keyboard
 
 	fn handle_capability_key_interrupt(&self, 
 	   capability: Capability, 
-	   state: &mut MutexGuard<KeyboardState>, 
+	   state: &mut KeyboardState, 
 	   data: &[u8])
 		-> Vec<DeviceEvent>
 	{

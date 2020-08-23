@@ -2,13 +2,28 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::sync::mpsc::{channel, Receiver};
+use std::sync::mpsc::{channel, Sender, Receiver};
 use std::io::{prelude::*, stdin, stdout};
+use std::thread;
+use std::time::Duration;
+
+use serde::{Serialize, Deserialize};
 
 use hidapi::HidApi;
 
-mod x11i;
+use crate::windowsystem::ActiveWindowInfo;
+
+mod windowsystem;
+mod config;
+mod macros;
 mod g815;
+
+pub struct SharedState
+{
+	window_system: Box<dyn windowsystem::WindowSystem>,
+	active_window: Option<ActiveWindowInfo>,
+	keyboard_state: KeyboardState
+}
 
 pub struct KeyboardState
 {
@@ -17,7 +32,7 @@ pub struct KeyboardState
 	macro_recording: bool
 }
 
-#[derive(PartialEq, Eq, Hash, Clone, Copy, Debug)]
+#[derive(PartialEq, Eq, Hash, Clone, Copy, Debug, Deserialize, Serialize)]
 pub enum KeyType
 {
 	GKey,
@@ -49,22 +64,46 @@ pub enum DeviceEvent
 	BrightnessLevelChanged(u8)
 }
 
-impl KeyboardState
+#[derive(PartialEq, Eq, Hash, Copy, Clone)]
+pub enum Capability
 {
-	pub fn new() -> Self
+	GKeys = 0x8010, // usual id = 0x0a
+	ModeSwitching = 0x8020, // usual id = 0x0b
+	MacroRecording = 0x8030, // usual id = 0x0c
+	BrightnessAdjustment = 0x8040, // usual id = 0x0d
+	GameMode = 0x4522, // usual id = 0x08
+
+	// not sure what this one is but it's id (0xf) often comes around setting up lighting
+	SomethingLightingRelated = 0x8071 
+}
+
+#[derive(Debug)]
+pub struct CapabilityData
+{
+	id: u8,
+	key_type: Option<KeyType>,
+	key_count: Option<u8>,
+	raw: Option<Vec<u8>>
+}
+
+impl CapabilityData
+{
+	pub fn no_capability() -> Self
 	{
-		KeyboardState 
-		{ 
-			mode: 0, 
-			key_bitmasks: HashMap::new(),
-			macro_recording: false 
+		CapabilityData
+		{
+			id: 0,
+			key_type: None,
+			key_count: None,
+			raw: None
 		}
 	}
 }
 
 fn main()
 {
-	let x11i = x11i::X11Interface::new();
+	let window_system = windowsystem::get_window_system().unwrap();
+
 	let hidapi = HidApi::new().unwrap();
 	let mut kb = g815::G815Keyboard::new(&hidapi).unwrap();
 
@@ -74,16 +113,16 @@ fn main()
 
 	kb.load_capabilities();
 
-	let gkey_capability = kb.capability_data(g815::Capability::GKeys);
+	let gkey_capability = kb.capability_data(Capability::GKeys);
 	println!("GKey capability data: {:x?}", gkey_capability.unwrap());
 
-	let mkey_capability = kb.capability_data(g815::Capability::ModeSwitching);
+	let mkey_capability = kb.capability_data(Capability::ModeSwitching);
 	println!("MKey capability data: {:x?}", mkey_capability.unwrap());
 
-	let gmkey_capability = kb.capability_data(g815::Capability::GameMode);
+	let gmkey_capability = kb.capability_data(Capability::GameMode);
 	println!("game mode key capability data: {:x?}", gmkey_capability.unwrap());
 
-	let mrkey_capability = kb.capability_data(g815::Capability::MacroRecording);
+	let mrkey_capability = kb.capability_data(Capability::MacroRecording);
 	println!("game mode key capability data: {:x?}", mrkey_capability.unwrap());
 
 	let kb = Arc::new(kb);
@@ -94,13 +133,23 @@ fn main()
 
 	let thread_kb = Arc::clone(&kb);
 	let (tx, rx) = channel();
-	let state = Arc::new(Mutex::new(KeyboardState::new()));
-	let x11i = Arc::new(x11i);
-	let thread_x11i = Arc::clone(&x11i);
+	let state = Arc::new(Mutex::new(SharedState
+	{
+		keyboard_state: KeyboardState 
+		{
+			key_bitmasks: HashMap::new(),
+			mode: 1,
+			macro_recording: false
+		},
+		active_window: None,
+		window_system: window_system
+	}));
+
+	let thread_shared_state = Arc::clone(&state);
 
 	let child = std::thread::spawn(move || 
 	{
-		device_thread(thread_kb, state, thread_x11i, rx);
+		device_thread(thread_kb, thread_shared_state, rx);
 	});
 
 	let mut command = String::new();
@@ -119,26 +168,48 @@ fn main()
 	kb.release_control();
 	println!("should now be back in hardware mode.");
 
-	let active_window = x11i.get_active_window_info().unwrap();
+	let active_window = state.lock().unwrap().window_system.active_window_info().unwrap();
 
 	println!(
-		"Active Window:\n\tPID: {}\n\tTitle: {}\n\tExecutable: {}", 
+		"Active Window:\n\tPID: {}\n\tTitle: {}\n\tExecutable: {}\n\tClass: {}\n\tClass Name: {}", 
 		active_window.pid.unwrap_or(0),
-		active_window.title.unwrap_or("unknown".to_string()),
-		active_window.executable.unwrap_or("unknown".to_string()));
+		active_window.title.unwrap_or("unknown".into()),
+		active_window.executable.unwrap_or("unknown".into()),
+		active_window.class.unwrap_or("unknown".into()),
+		active_window.class_name.unwrap_or("unknown".into()));
+}
 
-	if let Some(hint) = active_window.class_hint
+enum MainThreadEvent
+{
+	ActiveWindowChanged
+}
+
+fn active_window_watcher_thread(
+	state: Arc<Mutex<SharedState>>, 
+	rx: Receiver<bool>, 
+	tx: Sender<MainThreadEvent>)
+{
+	while rx.try_recv().is_err()
 	{
-		println!("\tClass Hint Name: {}\n\tClass Hint Class: {}", hint.name, hint.class);
+		let mut state = state.lock().unwrap();
+		let active_window = state.window_system.active_window_info();
+
+		if state.active_window != active_window
+		{
+			state.active_window = active_window;
+			tx.send(MainThreadEvent::ActiveWindowChanged);
+		}
+
+		thread::sleep(Duration::from_millis(1500));
 	}
 }
 
-fn device_thread(kb: Arc<g815::G815Keyboard>, state: Arc<Mutex<KeyboardState>>, x11i: Arc<x11i::X11Interface>, rx: Receiver<bool>)
+fn device_thread(kb: Arc<g815::G815Keyboard>, state: Arc<Mutex<SharedState>>, rx: Receiver<bool>)
 {
 	loop
 	{
-		let events = kb.poll_for_events(&state);
 		let mut state = state.lock().unwrap();
+		let events = kb.poll_for_events(&mut state.keyboard_state);
 
 		events.iter().for_each(|event| match event
 		{
@@ -156,8 +227,8 @@ fn device_thread(kb: Arc<g815::G815Keyboard>, state: Arc<Mutex<KeyboardState>>, 
 			},
 			DeviceEvent::KeyUp(KeyType::MacroRecord, _) => 
 			{
-				state.macro_recording = !state.macro_recording;
-				kb.set_macro_record_mode(match state.macro_recording 
+				state.keyboard_state.macro_recording = !state.keyboard_state.macro_recording;
+				kb.set_macro_record_mode(match state.keyboard_state.macro_recording 
 				{
 					true => g815::MacroRecordMode::Recording,
 					false => g815::MacroRecordMode::Default
@@ -165,17 +236,17 @@ fn device_thread(kb: Arc<g815::G815Keyboard>, state: Arc<Mutex<KeyboardState>>, 
 			},
 			DeviceEvent::KeyUp(KeyType::Mode, mode) => 
 			{
-				state.mode = *mode;
-				kb.set_mode(state.mode);
+				state.keyboard_state.mode = *mode;
+				kb.set_mode(state.keyboard_state.mode);
 			},
-			DeviceEvent::MediaKeyDown(key) => x11i.send_key_press(match key
+			DeviceEvent::MediaKeyDown(key) => state.window_system.send_key_combo_press(match key
 			{
-				MediaKey::Mute => x11::keysym::XF86XK_AudioMute,
-				MediaKey::PlayPause => x11::keysym::XF86XK_AudioPlay,
-				MediaKey::Next => x11::keysym::XF86XK_AudioNext,
-				MediaKey::Previous => x11::keysym::XF86XK_AudioPrev,
-				MediaKey::VolumeUp => x11::keysym::XF86XK_AudioRaiseVolume,
-				MediaKey::VolumeDown => x11::keysym::XF86XK_AudioLowerVolume
+				MediaKey::Mute => "XF86AudioMute",
+				MediaKey::PlayPause => "XF86AudioPlay",
+				MediaKey::Next => "XF86AudioNext",
+				MediaKey::Previous => "XF86AudioPrev",
+				MediaKey::VolumeUp => "XF86AudioRaiseVolume",
+				MediaKey::VolumeDown => "XF86AudioLowerVolume"
 			}),
 			_ => ()
 		});
@@ -185,6 +256,6 @@ fn device_thread(kb: Arc<g815::G815Keyboard>, state: Arc<Mutex<KeyboardState>>, 
 			break;
 		}
 
-		std::thread::sleep(std::time::Duration::from_millis(1));
+		std::thread::sleep(std::time::Duration::from_millis(5));
 	}
 }

@@ -1,0 +1,24 @@
+{
+	"bindings":
+	{
+		"default":
+		{
+			"gkeys": 
+			{
+				"1": 
+				{
+					"type": "keysequence",
+				}
+			}
+		}
+	},
+	"assignments":
+	{
+	},
+	"macros":
+	{
+	},
+	"themes":
+	{
+	}
+}

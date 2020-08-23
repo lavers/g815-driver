@@ -8,6 +8,8 @@ use std::sync::Mutex;
 use x11::{xlib, xtest};
 use x11::xlib::{Display, Window, KeyCode, XFree};
 
+use crate::windowsystem::{ActiveWindowInfo, WindowSystem};
+
 #[derive(Debug)]
 pub enum GetWindowPropertyError
 {
@@ -15,14 +17,6 @@ pub enum GetWindowPropertyError
 	BadAtom,
 	BadValue,
 	UnknownError
-}
-
-pub struct ActiveWindowInfo
-{
-	pub pid: Option<i32>,
-	pub title: Option<String>,
-	pub executable: Option<String>,
-	pub class_hint: Option<WindowClassHint>
 }
 
 pub struct WindowClassHint
@@ -62,25 +56,6 @@ impl X11Interface
 				max_keycode: max_keycode as KeyCode
 			}
 		}
-	}
-
-	pub fn get_active_window_info(&self) -> Option<ActiveWindowInfo>
-	{
-		self.get_active_window()
-			.map(|window| 
-			{
-				let pid = self.get_window_pid(window).unwrap_or(None);
-
-				ActiveWindowInfo
-				{
-					pid,
-					title: self.get_window_name(window).unwrap_or(None),
-					executable: pid
-						.and_then(|pid| std::fs::read_link(format!("/proc/{}/exe", pid)).ok())
-						.map(|exe_path| exe_path.to_string_lossy().into()),
-					class_hint: self.get_window_class_hint(window).ok()
-				}
-			})
 	}
 
 	pub fn get_active_window(&self) -> Option<Window>
@@ -167,7 +142,7 @@ impl X11Interface
 		}
 	}
 
-	pub unsafe fn get_window_property(&self, window: Window, property: &str) 
+	unsafe fn get_window_property(&self, window: Window, property: &str) 
 		-> Result<Option<*mut c_uchar>, GetWindowPropertyError>
 	{
 		let display = *self.display.lock().unwrap();
@@ -209,7 +184,7 @@ impl X11Interface
 		}
 	}
 
-	pub fn get_unused_keycode(&self) -> Option<KeyCode>
+	fn find_unused_keycode(&self) -> Option<KeyCode>
 	{
 		unsafe
 		{
@@ -236,7 +211,7 @@ impl X11Interface
 		}
 	}
 
-	pub fn key_string_to_symbol(&self, key: &str) -> Option<c_uint>
+	fn key_name_to_symbol(&self, key: &str) -> Option<c_uint>
 	{
 		let key = match key
 		{
@@ -267,11 +242,11 @@ impl X11Interface
 		}
 	}
 
-	pub fn key_combo_to_sequence(&self, combo: &str) -> Option<Vec<c_uint>>
+	fn key_combo_to_keysym_sequence(&self, combo: &str) -> Option<Vec<c_uint>>
 	{
 		combo
 			.split("+")
-			.map(|key_string| self.key_string_to_symbol(key_string))
+			.map(|key_string| self.key_name_to_symbol(key_string))
 			.collect()
 	}
 
@@ -280,7 +255,7 @@ impl X11Interface
 	/// Ideally this would take a slice of &[KeySym] however
 	/// all of the KeySym constants are defined as c_uint
 	/// but KeySym is defined as c_ulong for some reason
-	pub fn send_key_sequence(&self, sequence: &[c_uint], pressed: bool, delay: Duration)
+	fn send_keysym_sequence(&self, sequence: &[c_uint], pressed: bool, delay: Duration)
 	{
 		unsafe
 		{
@@ -294,7 +269,7 @@ impl X11Interface
 				if keycode == 0
 				{
 					keycode = *temporary_keycode
-						.get_or_insert(self.get_unused_keycode().unwrap());
+						.get_or_insert(self.find_unused_keycode().unwrap());
 
 					let mut symbol = *symbol as u64;
 					xlib::XChangeKeyboardMapping(display, keycode as i32, 1, &mut symbol, 1);
@@ -319,18 +294,6 @@ impl X11Interface
 			}
 		}
 	}
-
-	pub fn send_key_sequence_press(&self, sequence: &[c_uint])
-	{
-		let duration = Duration::from_millis(6);
-		self.send_key_sequence(sequence, true, duration);
-		self.send_key_sequence(sequence, false, duration);
-	}
-
-	pub fn send_key_press(&self, key: c_uint)
-	{
-		self.send_key_sequence_press(&[key; 1]);
-	}
 }
 
 impl Drop for X11Interface
@@ -341,5 +304,34 @@ impl Drop for X11Interface
 		{
 			XFree(*self.display.lock().unwrap() as *mut c_void);
 		}
+	}
+}
+
+impl WindowSystem for X11Interface 
+{
+	fn active_window_info(&self) -> Option<ActiveWindowInfo>
+	{
+		self.get_active_window().map(|window| 
+		{
+			let pid = self.get_window_pid(window).unwrap_or(None);
+			let class_hint = self.get_window_class_hint(window).ok();
+
+			ActiveWindowInfo
+			{
+				pid,
+				title: self.get_window_name(window).unwrap_or(None),
+				executable: pid
+					.and_then(|pid| std::fs::read_link(format!("/proc/{}/exe", pid)).ok())
+					.map(|exe_path| exe_path.to_string_lossy().into()),
+				class: class_hint.as_ref().map(|hint| hint.class.clone()),
+				class_name: class_hint.as_ref().map(|hint| hint.name.clone())
+			}
+		})
+	}
+
+	fn send_key_combo(&self, key_combo: &str, pressed: bool, delay: Duration)
+	{
+		self.key_combo_to_keysym_sequence(key_combo)
+			.map(|sequence| self.send_keysym_sequence(&sequence, pressed, delay));
 	}
 }
