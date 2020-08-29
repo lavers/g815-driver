@@ -10,3 +10,6 @@ x11 = "2.18"
 hidapi = "1.2.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_yaml = "0.8"
+threadpool = "1.8"
+enum_derive = "0.1"
+macro-attr = "0.2"

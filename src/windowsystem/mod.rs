@@ -20,7 +20,7 @@ impl dyn WindowSystem where Self: Send + Sync
 	}
 }
 
-#[derive(PartialEq, Eq)]
+#[derive(PartialEq, Eq, Clone, Debug)]
 pub struct ActiveWindowInfo
 {
 	pub pid: Option<i32>,

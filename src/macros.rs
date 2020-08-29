@@ -1,5 +1,5 @@
 use std::sync::mpsc::{Receiver, TryRecvError};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use serde::{Serialize, Deserialize};
@@ -78,21 +78,21 @@ pub enum Signal
 }
 
 fn macro_thread(
-	state: Arc<SharedState>, 
+	state: Arc<RwLock<SharedState>>, 
 	macro_: Macro, 
 	signal_receiver: Receiver<Signal>, 
 	count: Option<u32>)
 {
 	let mut i = 0;
 
-	while count.is_none() || i < count.unwrap()
+	while (count.is_none() || i < count.unwrap())
 	{
 		i += 1;
 
 		macro_
 			.steps
 			.iter()
-			.for_each(|step| step.execute(state.window_system.as_ref()));
+			.for_each(|step| step.execute(state.read().unwrap().window_system.as_ref()));
 
 		match signal_receiver.try_recv()
 		{
