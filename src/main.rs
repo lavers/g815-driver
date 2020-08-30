@@ -3,106 +3,41 @@
 #![recursion_limit="512"]
 
 use std::sync::{Arc, RwLock};
-use std::sync::mpsc::{channel, Sender, Receiver};
-use std::io::{prelude::*, stdin, stdout};
+use std::sync::mpsc::{channel, Receiver};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
-
-use serde::{Serialize, Deserialize};
 
 use hidapi::HidApi;
 
 use threadpool::ThreadPool;
 
-use crate::windowsystem::{WindowSystem, ActiveWindowInfo};
+use config::Configuration;
+use windowsystem::{WindowSystem, ActiveWindowInfo};
+use device::g815;
+use device::scancode::Scancode;
+use device::rgb::{Color, ScancodeAssignments};
+use device::{DeviceEvent, KeyType, MediaKey};
 
 mod windowsystem;
-mod scancode;
+mod device;
 mod config;
 mod macros;
-mod g815;
 
 pub struct SharedState
 {
 	window_system: Box<dyn WindowSystem>,
+	config: Configuration,
 	macro_recording: bool
-}
-
-#[derive(PartialEq, Eq, Hash, Clone, Copy, Debug, Deserialize, Serialize)]
-pub enum KeyType
-{
-	GKey,
-	Mode,
-	GameMode,
-	MacroRecord,
-	Light,
-	MediaControl
-}
-
-#[derive(PartialEq, Eq, Hash, Clone, Copy, Debug)]
-pub enum MediaKey
-{
-	PlayPause = 0x01,
-	Previous = 0x02,
-	Next = 0x08,
-	VolumeUp = 0x10,
-	VolumeDown = 0x20,
-	Mute = 0x40
-}
-
-#[derive(Debug)]
-pub enum DeviceEvent
-{
-	KeyDown(KeyType, u8),
-	KeyUp(KeyType, u8),
-	MediaKeyUp(MediaKey),
-	MediaKeyDown(MediaKey),
-	BrightnessLevelChanged(u8)
-}
-
-#[derive(PartialEq, Eq, Hash, Copy, Clone, Debug)]
-pub enum Capability
-{
-	GKeys = 0x8010, // usual id = 0x0a
-	ModeSwitching = 0x8020, // usual id = 0x0b
-	MacroRecording = 0x8030, // usual id = 0x0c
-	BrightnessAdjustment = 0x8040, // usual id = 0x0d
-	GameMode = 0x4522, // usual id = 0x08
-
-	// not sure what this one is but it's id (0xf) often comes around setting up lighting
-	SomethingLightingRelated = 0x8071 
-}
-
-#[derive(Debug)]
-pub struct CapabilityData
-{
-	id: u8,
-	key_type: Option<KeyType>,
-	key_count: Option<u8>,
-	raw: Option<Vec<u8>>
-}
-
-impl CapabilityData
-{
-	pub fn no_capability() -> Self
-	{
-		CapabilityData
-		{
-			id: 0,
-			key_type: None,
-			key_count: None,
-			raw: None
-		}
-	}
 }
 
 fn main()
 {
+	let config = Configuration::load().unwrap();
 	let hidapi = HidApi::new().unwrap();
-	let window_system = windowsystem::get_window_system().unwrap();
-	let mut kb = g815::G815Keyboard::new(&hidapi).unwrap();
-
 	let pool = ThreadPool::new(10);
+	let window_system = WindowSystem::new().unwrap();
+	let mut kb = g815::G815Keyboard::new(&hidapi).unwrap();
 
 	kb.load_capabilities();
 	kb.take_control();
@@ -111,97 +46,98 @@ fn main()
 	let state = Arc::new(RwLock::new(SharedState
 	{
 		window_system: window_system,
-		macro_recording: false
+		macro_recording: false,
+		config
 	}));
 
 	let (main_thread_tx, main_thread_rx) = channel();
 	let (device_thread_tx, device_thread_rx) = channel();
 	let (ww_thread_tx, ww_thread_rx) = channel();
+	let should_exit = Arc::new(AtomicBool::new(false));
 
-	let window_watcher_thread = 
 	{
 		let state = Arc::clone(&state);
 		let main_thread_tx = main_thread_tx.clone();
-
-		thread::spawn(move || active_window_watcher_thread(state, ww_thread_rx, main_thread_tx))
-	};
-
-	scancode::Scancode::iter_variants()
-		.for_each(|scancode|
+		pool.execute(move || WindowSystem::active_window_watcher_thread(state, ww_thread_rx, main_thread_tx))
+	}
+	{
+		let should_exit = should_exit.clone();
+		ctrlc::set_handler(move || 
 		{
-			let mut data = Vec::new();
-			data.push((scancode.to_rgb_id(), g815::Color::new(0, 0, 255)));
-			let kb = kb.read().unwrap();
-			println!("scancode: {:#?}", scancode);
-			kb.set_4(&data);
-			kb.commit();
-			thread::sleep(Duration::from_millis(500));
+			println!("got ctrl-c");
+			should_exit.store(true, Ordering::Relaxed);
 		});
-
-	let device_thread = 
+	}
 	{
 		let state = Arc::clone(&state);
 		let device = Arc::clone(&kb);
 		//let main_thread_tx = main_thread_tx.clone();
 
-		thread::spawn(move || device_thread(device, state, device_thread_rx))
-	};
+		pool.execute(move || device_thread(device, state, device_thread_rx))
+	}
 
-	let mut command = String::new();
-	print!("> press any to return to hw mode");
-	stdout().flush();
-	let read = stdin().lock().read_line(&mut command).unwrap();
-	println!("read {}, dump: {:#?}", read, &command);
+	println!("> now in main event loop, send ctrl-c to shutdown");
 
-	device_thread_tx.send(());
-	device_thread.join();
-	println!("device thread exited");
+	while !should_exit.load(Ordering::Relaxed)
+	{
+		std::thread::sleep(Duration::from_millis(10));
 
+		if let Ok(message) = main_thread_rx.try_recv()
+		{
+			match message
+			{
+				MainThreadEvent::ActiveWindowChanged(active_window) => 
+				{
+					let config = &state.read().unwrap().config;
+					let profile_name = config.profile_for_active_window(&active_window);
+
+					println!("active window has changed, new profile: {}\n{:#?}", &profile_name, &active_window);
+
+					if let Some(profile) = config.profiles.get(&profile_name)
+					{
+						if let Some(ref theme_name) = profile.theme
+						{
+							if let Some(scancode_assignments) = config.theme_scancode_assignments(&theme_name)
+							{
+								device_thread_tx.send(DeviceThreadSignal::SetScancodes(scancode_assignments));
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	println!("notifying threads of shutdown");
+
+	device_thread_tx.send(DeviceThreadSignal::Shutdown);
 	ww_thread_tx.send(());
-	window_watcher_thread.join();
-	println!("wnidow watcher thread exited");
+
+	pool.join();
+	println!("threadpool shutdown");
 
 	kb.read().unwrap().release_control();
 }
 
-enum MainThreadEvent
+pub enum MainThreadEvent
 {
 	ActiveWindowChanged(Option<ActiveWindowInfo>)
 }
 
-fn active_window_watcher_thread(
-	state: Arc<RwLock<SharedState>>, 
-	rx: Receiver<()>, 
-	tx: Sender<MainThreadEvent>)
+enum DeviceThreadSignal
 {
-	let mut last_active_window = None;
-
-	// receiving anything should be interpreted as a shutdown event
-	while rx.try_recv().is_err()
-	{
-		let active_window = {
-			// make sure state is not locked for any longer
-			// than it needs to use the window_system to prevent locks
-			let state = state.read().unwrap();
-			state.window_system.active_window_info()
-		};
-
-		if last_active_window != active_window
-		{
-			tx.send(MainThreadEvent::ActiveWindowChanged(active_window.clone()));
-			last_active_window = active_window;
-		}
-
-		thread::sleep(Duration::from_millis(1500));
-	}
+	Shutdown,
+	SetScancodes(ScancodeAssignments)
 }
 
-fn device_thread(kb: Arc<RwLock<g815::G815Keyboard>>, state: Arc<RwLock<SharedState>>, rx: Receiver<()>)
+fn device_thread(
+	kb: Arc<RwLock<g815::G815Keyboard>>, 
+	state: Arc<RwLock<SharedState>>, 
+	rx: Receiver<DeviceThreadSignal>)
 {
-	while rx.try_recv().is_err()
+	loop
 	{
 		let mut device = kb.write().unwrap();
-		let mut state = state.write().unwrap();
 		let events = device.poll_for_events();
 
 		events.iter().for_each(|event| match event
@@ -220,6 +156,7 @@ fn device_thread(kb: Arc<RwLock<g815::G815Keyboard>>, state: Arc<RwLock<SharedSt
 			},
 			DeviceEvent::KeyUp(KeyType::MacroRecord, _) => 
 			{
+				let mut state = state.write().unwrap();
 				state.macro_recording = !state.macro_recording;
 				device.set_macro_recording(state.macro_recording);
 			},
@@ -227,18 +164,45 @@ fn device_thread(kb: Arc<RwLock<g815::G815Keyboard>>, state: Arc<RwLock<SharedSt
 			{
 				device.set_mode(*mode);
 			},
-			DeviceEvent::MediaKeyDown(key) => state.window_system.send_key_combo_press(match key
+			DeviceEvent::MediaKeyDown(key) => 
 			{
-				MediaKey::Mute => "XF86AudioMute",
-				MediaKey::PlayPause => "XF86AudioPlay",
-				MediaKey::Next => "XF86AudioNext",
-				MediaKey::Previous => "XF86AudioPrev",
-				MediaKey::VolumeUp => "XF86AudioRaiseVolume",
-				MediaKey::VolumeDown => "XF86AudioLowerVolume"
-			}),
+				state.read().unwrap().window_system.send_key_combo_press(match key
+				{
+					MediaKey::Mute => "XF86AudioMute",
+					MediaKey::PlayPause => "XF86AudioPlay",
+					MediaKey::Next => "XF86AudioNext",
+					MediaKey::Previous => "XF86AudioPrev",
+					MediaKey::VolumeUp => "XF86AudioRaiseVolume",
+					MediaKey::VolumeDown => "XF86AudioLowerVolume"
+				})
+			},
 			_ => ()
 		});
 
+		if let Ok(signal) = rx.try_recv()
+		{
+			match signal
+			{
+				DeviceThreadSignal::Shutdown => break,
+				DeviceThreadSignal::SetScancodes(scancodes) => device.set_scancodes(scancodes)
+			}
+		}
+
 		std::thread::sleep(std::time::Duration::from_millis(5));
 	}
+}
+
+fn test_all_scancodes(kb: &Arc<RwLock<g815::G815Keyboard>>)
+{
+	Scancode::iter_variants()
+		.for_each(|scancode|
+		{
+			let mut data = Vec::new();
+			data.push((scancode, Color::new(255, 0, 0)));
+			let kb = kb.read().unwrap();
+			println!("scancode: {:#?}", scancode);
+			kb.set_4(&data);
+			kb.commit();
+			thread::sleep(Duration::from_millis(500));
+		});
 }

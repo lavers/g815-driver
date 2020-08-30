@@ -3,7 +3,9 @@ use hidapi::{HidApi, HidDevice, HidResult, HidError};
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-use crate::{DeviceEvent, KeyType, MediaKey, Capability, CapabilityData};
+use crate::device::{DeviceEvent, KeyType, MediaKey, Capability, CapabilityData};
+use crate::device::rgb::{Color, Theme, KeySelection, ScancodeAssignments};
+use crate::device::scancode::Scancode;
 
 static VID: u16 = 0x046d;
 static PID: u16 = 0xc33f;
@@ -18,15 +20,14 @@ static PID: u16 = 0xc33f;
 enum Command
 {
 	InitializeSession = 0x001a,
-	SetModeLeds = 0x0b1a, // followed by bitmask of mode key
+	SetModeLeds = 0x0b1a, // followed by bitmask of mode key leds
 	Set13 = 0x106a, // followed by r, g, b, [13 keycodes]
-	Set4 = 0x101a, // followed by keycode, r, g, b, [ff terminator if < 4]
-	// note: set4 also seems to sometimes be 0x101d followed by a commit of 0x107d
+	Set4 = 0x101a, // followed by (keycode, r, g, b){1,4}, [ff terminator if < 4]
 	SetEffect = 0x0f1a, // followed by group, effect, r, g, b, [period h..l], [00..00..01]
 	Commit = 0x107a,
 	ResetGameMode = 0x083a, // removes all non-default game mode key disables
-	GameModeAddKeys = 0x081a, // add 1-15 to add keycodes to game mode, send multiple for more
-	SetMacroRecordMode = 0x0c0a, // followed by 00 or 01 for in/out of record mode
+	GameModeAddKeys = 0x081a, // followed by (usb scancode){1,15}
+	SetMacroRecordMode = 0x0c0a, // followed by 00 or 01 for MR led off/on
 	SetControlMode = 0x111a, // 01 for hardware, 02 for software
 	SetGKeysMode = 0x0a2a, // 00 G-keys in F-key mode, 01 in software mode
 	GetVersion = 0x021a,
@@ -51,6 +52,16 @@ pub enum EffectGroup
 {
 	Logo = 0x00,
 	Keys = 0x01
+}
+
+pub enum Effect
+{
+	None,
+	Static,
+	Breathing,
+	Cycle,
+	Waves,
+	Ripple
 }
 
 #[derive(Debug)]
@@ -86,21 +97,6 @@ pub struct G815Keyboard
 	capability_id_cache: HashMap<u8, Capability>,
 	key_bitmasks: HashMap<KeyType, u8>,
 	mode: u8
-}
-
-pub struct Color
-{
-	r: u8,
-	g: u8,
-	b: u8
-}
-
-impl Color
-{
-	pub fn new(r: u8, g: u8, b: u8) -> Self
-	{
-		Color { r, g, b }
-	}
 }
 
 impl G815Keyboard
@@ -330,18 +326,20 @@ impl G815Keyboard
 		self.version(0x01)
 	}
 
-	pub fn set_13(&self, color: Color, keys: &[u8]) -> CommandResult<()>
+	/// Sets a group of 13 scancodes to a single color
+	pub fn set_13(&self, color: Color, keys: &[Scancode]) -> CommandResult<()>
 	{
 		let mut data = vec![color.r, color.g, color.b];
-		data.extend(keys);
+		keys.iter().for_each(|key| data.push(key.rgb_id()));
 		self.execute(Command::Set13, &data).map(|_| ())
 	}
 
-	pub fn set_4(&self, keys: &[(u8, Color)]) -> CommandResult<()>
+	/// Sets 4 keys to 4 separate colors
+	pub fn set_4(&self, keys: &[(Scancode, Color)]) -> CommandResult<()>
 	{
 		let mut data: Vec<u8> = keys
 			.iter()
-			.map(|(key, color)| vec![*key, color.r, color.g, color.b])
+			.map(|(key, color)| vec![key.rgb_id(), color.r, color.g, color.b])
 			.flatten()
 			.collect();
 
@@ -386,28 +384,40 @@ impl G815Keyboard
 		self.execute(Command::SetGKeysMode, &[mode as u8; 1]).map(|_| ())
 	}
 
-	pub fn set_effect(&self, group: EffectGroup, effect: u8, color: Color, duration: u16) -> CommandResult<()>
+	/// Sets an effect on a group. duration is in milliseconds, brightness
+	/// is a 0-100 percentage.
+	pub fn set_effect(&self, 
+		group: EffectGroup, 
+		effect: Effect, 
+		color: Color, 
+		duration: u16,
+		brightness: u8) -> CommandResult<()>
 	{
 		self.execute(Command::SetEffect, &vec![
+			 // TODO this structure changes depending on the effect, not as rigid
+			 // as first thought
 			group as u8,
-			effect,
+			effect as u8,
 			color.r,
 			color.g,
 			color.b,
+			0,
+			0,
 			(duration >> 8) as u8,
 			duration as u8,
+			brightness,
 			0x00,
 			0x00,
+			0x01,
 			0x00,
 			0x00,
-			0x00,
-			0x01
+			0x00
 		]).map(|_| ())
 	}
 
 	pub fn solid_color(&self, group: EffectGroup, color: Color) -> CommandResult<()>
 	{
-		self.set_effect(group, 1, color, 0x2000)
+		self.set_effect(group, Effect::Static, color, 2000, 100)
 	}
 
 	pub fn reset_game_mode_keys(&self) -> CommandResult<()>
@@ -415,47 +425,80 @@ impl G815Keyboard
 		self.write(Command::ResetGameMode as u16, &[0; 0]).map(|_| ())
 	}
 
-	pub fn add_game_mode_keys(&self, keys: &[u8]) -> CommandResult<()>
+	pub fn add_game_mode_keys(&self, scancodes: &[Scancode]) -> CommandResult<()>
 	{
-		keys
-			.chunks(15)
-			.map(|key_chunk| self.write(Command::ResetGameMode as u16, key_chunk).map(|_| ()))
+		scancodes
+			.iter()
+			.filter_map(|code| match code
+			{
+				// ghub doesn't let you add these to game mode so we probably
+				// shouldnt either
+
+				Scancode::LeftMeta 
+					| Scancode::RightMeta
+					| Scancode::ContextMenu
+					| Scancode::Mute
+					| Scancode::Light
+					| Scancode::G1
+					| Scancode::G2
+					| Scancode::G3
+					| Scancode::G4
+					| Scancode::G5
+					| Scancode::Logo
+					| Scancode::MediaPrevious
+					| Scancode::MediaNext
+					| Scancode::MediaPlayPause => None,
+				code => Some(*code as u8)
+			})
+			.collect::<Vec<u8>>()
+			.chunks(15) // last byte always seems to be 00 even if there are more than 15
+			.map(|scancodes| self.write(Command::GameModeAddKeys as u16, scancodes).map(|_| ()))
 			.collect()
 	}
 
-	pub fn clear(&self)
+	pub fn stop_effects(&self)
 	{
 		self.execute(Command::SetEffect, &[0; 1]);
 		self.execute(Command::SetEffect, &[1; 1]);
 	}
 
+	pub fn set_block(&self, color: Color, scancodes: &[Scancode]) -> CommandResult<()>
+	{
+		scancodes
+			.chunks(13)
+			.map(|scancodes| self.set_13(color, scancodes))
+			.collect()
+	}
+
+	/// Sets everything to black
+	pub fn clear_colors(&self) -> CommandResult<()>
+	{
+		self.stop_effects();
+		self.set_block(
+			Color::new(0, 0, 0), 
+			&Scancode::iter_variants().collect::<Vec<Scancode>>())
+	}
+
+	/// Takes control of the keyboard by starting a session,
+	/// enabling capability keys and clearing lighting and effects
 	pub fn take_control(&mut self) -> CommandResult<()>
 	{
-		self.execute(Command::InitializeSession, &[0; 0]);
+		self.execute(Command::InitializeSession, &[0; 0])?;
 		self.set_control_mode(ControlMode::Software)?;
 		self.set_gkeys_mode(GKeysMode::Software)?;
 		self.set_macro_recording(false)?;
 		self.set_mode(1)?;
 		self.reset_game_mode_keys()?;
 		self.execute(Command::LightingEnabled, &[1; 1])?;
-		self.clear();
+		self.stop_effects();
+		self.clear_colors();
 		Ok(())
-		//self.solid_color(EffectGroup::Keys, Color::new(255, 0, 0))?;
-		//self.solid_color(EffectGroup::Logo, Color::new(0, 0, 255)).map(|_| ())
-		//self.write(0x0f5a, &vec![01, 03, 03]).map(|_| ())
-		/*
-		self.write(0x0f5a, &vec![01, 03, 05])?;
-		self.write(Command::MarkStart as u16, &vec![])?;
-		self.write(0x0f5a, &vec![01, 03, 05])?;
-		self.write(Command::MarkEnd as u16, &vec![]).map(|_| ())
-		//self.write(Command::MediaKeysEnabled as u16, &vec![00, 00, 01])?;
-
-		//self.write(0x0f5a, &vec![01, 03, 03]).map(|_| ())
-		*/
 	}
 
+	/// Swaps control back to onboard mode
 	pub fn release_control(&self) -> CommandResult<()>
 	{
+		self.set_macro_recording(false)?;
 		self.set_gkeys_mode(GKeysMode::Default)?;
 		self.set_control_mode(ControlMode::Hardware)
 	}
@@ -476,7 +519,7 @@ impl G815Keyboard
 		}
 
 		// if it's not a media key or a capability key then ignore it
-		// note: 11 ff 0f 10 [00/01] comes up a lot but idk what it means
+		// note: 11 ff 0f 10 [00/01] comes in regularly, seems to be effect cycle done/restarting?
 
 		if buffer[0] != 0x11 || buffer[1] != 0xff
 		{
@@ -507,9 +550,9 @@ impl G815Keyboard
 			{
 				let key = match 1 << bit
 				{
-					0x01 => Some(MediaKey::PlayPause),
+					0x01 => Some(MediaKey::Next),
 					0x02 => Some(MediaKey::Previous),
-					0x08 => Some(MediaKey::Next),
+					0x08 => Some(MediaKey::PlayPause),
 					0x10 => Some(MediaKey::VolumeUp),
 					0x20 => Some(MediaKey::VolumeDown),
 					0x40 => Some(MediaKey::Mute),
@@ -526,6 +569,8 @@ impl G815Keyboard
 			.collect()
 	}
 
+	/// Handles conversion of a capability key interrupt (gkeys, mode keys etc)
+	/// into a list of device events based on previous and current bitmasks
 	fn handle_capability_key_interrupt(&mut self, capability: Capability, data: &[u8]) 
 		-> Vec<DeviceEvent>
 	{
@@ -558,5 +603,24 @@ impl G815Keyboard
 			},
 			_ => Vec::new()
 		}
+	}
+
+	pub fn set_scancodes(&self, color_map: ScancodeAssignments)
+	{
+		self.clear_colors();
+
+		color_map
+			.iter()
+			.for_each(|(color, scancodes)| 
+			{
+				scancodes
+					.chunks(13)
+					.for_each(|scancode_chunk| 
+					{
+						self.set_13(*color, &scancode_chunk);
+					});
+			});
+
+		self.commit();
 	}
 }

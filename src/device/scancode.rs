@@ -1,14 +1,18 @@
 use macro_attr::*;
 use enum_derive::*;
 
+use serde::{Serialize, Deserialize};
+
 macro_attr!
 {
-	#[derive(Copy, Debug, PartialEq, Eq, Clone, EnumFromStr!, IterVariants!(Scancodes))]
+	#[derive(Copy, Clone, Debug, PartialEq, Eq, 
+		Serialize, Deserialize, 
+		EnumDisplay!, EnumFromStr!, IterVariants!(Scancodes))]
 	pub enum Scancode 
 	{
 		// standard usb hid scancodes
 
-		A = 4, 
+		A = 4, // 0x01 in rgb
 		B, C, D, E, F, G, H, I, J, K, L, N, M, O, P, Q, R, S, T, U, V, W, X, Y, Z, 
 		N1, N2, N3, N4, N5, N6, N7, N8, N9, N0,
 		Enter,
@@ -48,10 +52,10 @@ macro_attr!
 		Numpad1, Numpad2, Numpad3, Numpad4, Numpad5, Numpad6, Numpad7, Numpad8, Numpad9, Numpad0,
 		NumpadDot,
 		Backslash,
-		NumpadEquals = 0x67,
-		ContextMenu = 0x76, // 62
+		// NumpadEquals = 0x67,
+		ContextMenu = 0x76, // 0x62 in rgb
 		Mute = 0x7f,
-		LeftControl = 0xe0, // 0x68
+		LeftControl = 0xe0, // 0x68 in rgb
 		LeftShift,
 		LeftAlt,
 		LeftMeta,
@@ -60,7 +64,7 @@ macro_attr!
 		RightAlt,
 		RightMeta,
 
-		// logitech-specific key codes (not real scan codes)
+		// logitech-specific rgb codes (not real scan codes)
 
 		Light = 0x99,
 		G1 = 0xb4,
@@ -77,12 +81,15 @@ macro_attr!
 
 impl Scancode
 {
-	pub fn to_rgb_id(&self) -> u8
+	pub fn rgb_id(&self) -> u8
 	{
 		let id = *self as u8;
 
 		match &self
 		{
+			Scancode::Mute => 0x9c,
+			Scancode::ContextMenu => 0x62,
+
 			// these don't have real scancodes so they're already
 			// rgb-only key ids
 
@@ -96,9 +103,6 @@ impl Scancode
 				| Scancode::MediaPlayPause 
 				| Scancode::Logo 
 				| Scancode::Light => id,
-
-			Scancode::Mute => 0x9c,
-			Scancode::ContextMenu => 0x62,
 
 			Scancode::LeftControl
 				| Scancode::LeftShift

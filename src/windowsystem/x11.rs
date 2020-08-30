@@ -8,7 +8,7 @@ use std::sync::Mutex;
 use x11::{xlib, xtest};
 use x11::xlib::{Display, Window, KeyCode, XFree};
 
-use crate::windowsystem::{ActiveWindowInfo, WindowSystem};
+use crate::windowsystem::{ActiveWindowInfo, WindowSystem, MouseButton};
 
 #[derive(Debug)]
 pub enum GetWindowPropertyError
@@ -318,7 +318,6 @@ impl WindowSystem for X11Interface
 
 			ActiveWindowInfo
 			{
-				pid,
 				title: self.get_window_name(window).unwrap_or(None),
 				executable: pid
 					.and_then(|pid| std::fs::read_link(format!("/proc/{}/exe", pid)).ok())
@@ -327,6 +326,25 @@ impl WindowSystem for X11Interface
 				class_name: class_hint.as_ref().map(|hint| hint.name.clone())
 			}
 		})
+	}
+
+	fn send_mouse_button(&self, button: MouseButton, pressed: bool)
+	{
+		unsafe
+		{
+			let display = *self.display.lock().unwrap();
+
+			xtest::XTestFakeButtonEvent(
+				display, 
+				match button 
+				{
+					MouseButton::Left => xlib::Button1,
+					MouseButton::Middle => xlib::Button2,
+					MouseButton::Right => xlib::Button3
+				}, 
+				pressed as c_int, 
+				xlib::CurrentTime);
+		}
 	}
 
 	fn send_key_combo(&self, key_combo: &str, pressed: bool, delay: Duration)

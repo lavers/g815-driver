@@ -1,0 +1,103 @@
+profiles:
+    default:
+        theme: default
+
+    tmux:
+        conditions:
+            executable: "/konsole$"
+            title: "tmux"
+        theme: tmux
+        gkey_sets:
+            - clipboard_shortcuts
+        gkeys:
+            1: 
+                simple_action:
+                    mouse_click: left
+        modes:
+            1: 
+                theme: toast
+                gkeys:
+                    3:
+                        run_macro: macro-name
+    spotify:
+        conditions:
+            class_name: "spotify"
+        theme: spotify
+
+gkey_sets:
+    clipboard_shortcuts:
+        1:
+            simple_action:
+                key_press: "ctrl+x"
+        2:
+            simple_action:
+                key_press: "ctrl+c"
+        3:
+            simple_action:
+                key_press: "ctrl+v"
+    tab_navigation:
+        4:
+            simple_action:
+                key_press: "ctrl+tab"
+        5:
+            simple_action:
+                key_press: "ctrl+shift+tab"
+
+macros:
+    click_every_second:
+        activation_type: toggle
+        steps:
+            - action: 
+                  mouse_click: left
+              duration: 20
+            - action: delay
+              duration: 1000
+    tmux_next_pane:
+        activation_type: singular
+        steps:
+            - action: 
+                  key_press: ctrl+n
+              duration: 20
+
+themes:
+    default:
+        custom:
+            ff0000:
+                - multiple: [Q, W, E, R, T, Y]
+                - keygroup: controlkeys
+            00ff00:
+                - multiple: [A, S, D, F, G]
+                - single: Enter
+            ff00ff:
+                - keygroup: modifiers
+            0000ff:
+                - keygroup: numpad
+            f59342:
+                - keygroup: mediakeys
+    tmux:
+        custom:
+            00ffff:
+                - keygroup: main
+            ff0000:
+                - keygroup: gkeys
+            ff00ff:
+                - keygroup: arrows
+    spotify:
+        custom:
+            00ff00:
+                - keygroup: main
+                - keygroup: mediakeys
+
+keygroups:
+    wasd: [W,A,S,D]
+    letters: [A,B,C,D,E,F,G,H,I,J,K,L,M,N,O,P,Q,R,S,T,U,V,W,X,Y,Z]
+    main: [A,B,C,D,E,F,G,H,I,J,K,L,N,M,O,P,Q,R,S,T,U,V,W,X,Y,Z,N1,N2,N3,N4,N5,N6,N7,N8,N9,N0,Enter,Backspace,Tab,Space,Minus,Equals,LeftBracket,RightBracket,USBackslash,HashTilde,Semicolon,Apostrophe,Grave,Comma,Dot,Slash,CapsLock,LeftControl,LeftShift,LeftAlt,LeftMeta,RightControl,RightShift,RightAlt,RightMeta,ContextMenu]
+    numbers: [N1,N2,N3,N4,N5,N6,N7,N8,N9,N0]
+    fkeys: [Escape,F1,F2,F3,F4,F5,F6,F7,F8,F9,F10,F11,F12]
+    gkeys: [G1,G2,G3,G4,G5]
+    numpad: [NumLock,NumpadDivide,NumpadMultiply,NumpadMinus,NumpadPlus,NumpadEnter,Numpad1,Numpad2,Numpad3,Numpad4,Numpad5,Numpad6,Numpad7,Numpad8,Numpad9,Numpad0,NumpadDot]
+    mediakeys: [Mute,MediaPrevious,MediaNext,MediaPlayPause]
+    arrows: [Up,Down,Left,Right]
+    modifiers: [LeftControl,LeftShift,LeftAlt,LeftMeta,RightControl,RightShift,RightAlt,RightMeta,ContextMenu]
+    controlkeys: [PrintScreen,ScrollLock,Pause,Insert,Home,PageUp,Delete,End,PageDown]
+
