@@ -96,7 +96,6 @@ pub struct G815Keyboard
 	capabilities: HashMap<Capability, CapabilityData>,
 	capability_id_cache: HashMap<u8, Capability>,
 	key_bitmasks: HashMap<KeyType, u8>,
-	mode: u8,
 	mode_leds: u8
 }
 
@@ -120,7 +119,6 @@ impl G815Keyboard
 				capabilities: HashMap::new(),
 				capability_id_cache: HashMap::new(),
 				key_bitmasks: HashMap::new(),
-				mode: 1,
 				mode_leds: 0x1
 			})
 	}
@@ -266,7 +264,7 @@ impl G815Keyboard
 
 		let capability_data = match id_result[0]
 		{
-			0 => CapabilityData::no_capability(),
+			0 => CapabilityData::default(),
 			capability_id => 
 			{
 				let data_command = ((capability_id as u16) << 8) | (Command::CapabilityInfo as u16);
@@ -329,6 +327,12 @@ impl G815Keyboard
 		self.version(0x01)
 	}
 
+	pub fn mode_count(&self) -> CommandResult<u8>
+	{
+		self.capability_data(Capability::ModeSwitching)
+			.map(|data| data.key_count.unwrap_or(0))
+	}
+
 	/// Sets a group of 13 scancodes to a single color
 	pub fn set_13(&self, color: Color, keys: &[Scancode]) -> CommandResult<()>
 	{
@@ -365,14 +369,28 @@ impl G815Keyboard
 
 	pub fn set_mode(&mut self, mode: u8) -> CommandResult<()>
 	{
-		self.mode = mode;
+		self.mode_leds = mode;
 		let mask = 1 << (mode - 1);
 		self.execute(Command::SetModeLeds, &[mask; 1]).map(|_| ())
 	}
 
-	pub fn mode(&self) -> u8
+	pub fn set_mode_led(&mut self, led: u8, on: bool) -> CommandResult<()>
 	{
-		self.mode
+		if on
+		{
+			self.mode_leds |= 1 << (led - 1);
+		}
+		else
+		{
+			self.mode_leds &= !(1 << (led - 1));
+		}
+
+		self.execute(Command::SetModeLeds, &[self.mode_leds; 1]).map(|_| ())
+	}
+
+	pub fn mode_leds(&self) -> u8
+	{
+		self.mode_leds
 	}
 
 	pub fn set_control_mode(&self, mode: ControlMode) -> CommandResult<()>

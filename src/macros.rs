@@ -1,4 +1,4 @@
-use std::sync::mpsc::{Receiver, TryRecvError};
+use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 use std::sync::Arc;
 use std::time::Duration;
 use std::process::{Command, Stdio};
@@ -8,18 +8,19 @@ use serde::{Serialize, Deserialize};
 
 use crate::SharedState;
 use crate::windowsystem::MouseButton;
+use crate::device::DeviceThreadSignal;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Macro
 {
-	activation_type: ActivationType,
-	theme: Option<String>,
-	steps: Vec<Step>
+	pub activation_type: ActivationType,
+	pub theme: Option<String>,
+	pub steps: Vec<Step>
 }
 
 
-#[derive(Copy, Clone, Debug, Serialize, Deserialize)]
-enum ActivationType
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum ActivationType
 {
 	#[serde(rename = "singular")]
 	Singular,
@@ -32,7 +33,7 @@ enum ActivationType
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-struct Step
+pub struct Step
 {
 	action: Action,
 	duration: u64
@@ -79,7 +80,8 @@ impl Step
 
 pub enum Signal
 {
-	Stop
+	Stop,
+	ResetCount
 }
 
 impl Macro
@@ -98,15 +100,6 @@ impl Macro
 		}
 	}
 
-	pub fn is_toggle(&self) -> bool
-	{
-		match self.activation_type
-		{
-			ActivationType::Toggle => true,
-			_ => false
-		}
-	}
-
 	pub fn execution_count(&self) -> Option<u32>
 	{
 		match self.activation_type
@@ -121,9 +114,11 @@ impl Macro
 	pub fn execution_thread(
 		self,
 		state: Arc<SharedState>, 
-		signal_receiver: Receiver<Signal>)
+		signal_receiver: Receiver<Signal>,
+		device_thread_tx: Sender<DeviceThreadSignal>,
+		macro_id: (u8, u8))
 	{
-		let count = self.execution_count();
+		let mut count = self.execution_count();
 		let mut i = 0;
 
 		while count.is_none() || i < count.unwrap()
@@ -136,13 +131,13 @@ impl Macro
 
 			match signal_receiver.try_recv()
 			{
-				Ok(signal) => match signal
-				{
-					Signal::Stop => break
-				},
-				Err(TryRecvError::Empty) => continue,
-				Err(TryRecvError::Disconnected) => break
+				Ok(Signal::ResetCount) => count = self.execution_count(),
+				Ok(Signal::Stop) 
+					| Err(TryRecvError::Disconnected) => break,
+				Err(TryRecvError::Empty) => continue
 			}
 		}
+
+		device_thread_tx.send(DeviceThreadSignal::MacroFinished(macro_id));
 	}
 }

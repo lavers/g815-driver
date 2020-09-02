@@ -76,7 +76,7 @@ impl dyn WindowSystem where Self: Send + Sync
 		self.send_mouse_button(button, false);
 	}
 
-	pub fn active_window_watcher_thread(
+	pub fn active_window_watcher(
 		state: Arc<SharedState>, 
 		rx: Receiver<()>, 
 		tx: Sender<MainThreadSignal>)
