@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 use crate::device::{DeviceEvent, KeyType, MediaKey, Capability, CapabilityData};
-use crate::device::rgb::{Color, Theme, KeySelection, ScancodeAssignments};
+use crate::device::rgb::{Color, ScancodeAssignments};
 use crate::device::scancode::Scancode;
 
 static VID: u16 = 0x046d;
@@ -96,7 +96,8 @@ pub struct G815Keyboard
 	capabilities: HashMap<Capability, CapabilityData>,
 	capability_id_cache: HashMap<u8, Capability>,
 	key_bitmasks: HashMap<KeyType, u8>,
-	mode: u8
+	mode: u8,
+	mode_leds: u8
 }
 
 impl G815Keyboard
@@ -119,7 +120,8 @@ impl G815Keyboard
 				capabilities: HashMap::new(),
 				capability_id_cache: HashMap::new(),
 				key_bitmasks: HashMap::new(),
-				mode: 1
+				mode: 1,
+				mode_leds: 0x1
 			})
 	}
 
@@ -166,7 +168,7 @@ impl G815Keyboard
 		device.set_blocking_mode(true)?;
 		device.write(&buffer)?;
 
-		println!("OUT(20) > {:0x?}", &buffer);
+		// println!("OUT(20) > {:0x?}", &buffer);
 
 		for _ in 0..10
 		{
@@ -179,7 +181,7 @@ impl G815Keyboard
 			{
 				if &buffer[..4] == expected_return
 				{
-					println!("ACK({:2}) > {:0x?}", bytes_read, &buffer);
+					//println!("ACK({:2}) > {:0x?}", bytes_read, &buffer);
 
 					buffer.drain(0..std::cmp::min(bytes_read, 4));
 					device.set_blocking_mode(false)?;
@@ -192,6 +194,7 @@ impl G815Keyboard
 
 					if &buffer[..5] == error_response.as_slice()
 					{
+						println!("OUT(20) > {:0x?}", &buffer);
 						println!("ERR({:2}) > {:0x?}", bytes_read, &buffer);
 						return Err(CommandError::Failure(
 							format!("device didn't like command {:#?}", &expected_return).into()))
@@ -200,7 +203,7 @@ impl G815Keyboard
 			}
 			else
 			{
-				println!("IN ({:2}) > {:0x?}", bytes_read, &buffer);
+				//println!("IN ({:2}) > {:0x?}", bytes_read, &buffer);
 			}
 		}
 
@@ -337,18 +340,22 @@ impl G815Keyboard
 	/// Sets 4 keys to 4 separate colors
 	pub fn set_4(&self, keys: &[(Scancode, Color)]) -> CommandResult<()>
 	{
-		let mut data: Vec<u8> = keys
-			.iter()
-			.map(|(key, color)| vec![key.rgb_id(), color.r, color.g, color.b])
-			.flatten()
-			.collect();
-
-		if keys.len() < 4
+		keys.chunks(4).map(|keys| 
 		{
-			data.push(0xff);
-		}
+			let mut data: Vec<u8> = keys
+				.iter()
+				.map(|(key, color)| vec![key.rgb_id(), color.r, color.g, color.b])
+				.flatten()
+				.collect();
 
-		self.execute(Command::Set4, &data).map(|_| ())
+			if keys.len() < 4
+			{
+				data.push(0xff);
+			}
+
+			self.execute(Command::Set4, &data).map(|_| ())
+		})
+		.collect()
 	}
 
 	pub fn commit(&self) -> CommandResult<()>
@@ -358,13 +365,14 @@ impl G815Keyboard
 
 	pub fn set_mode(&mut self, mode: u8) -> CommandResult<()>
 	{
+		self.mode = mode;
 		let mask = 1 << (mode - 1);
-		self.execute(Command::SetModeLeds, &[mask; 1])
-			.and_then(|_| 
-			{
-				self.mode = mode; 
-				Ok(())
-			})
+		self.execute(Command::SetModeLeds, &[mask; 1]).map(|_| ())
+	}
+
+	pub fn mode(&self) -> u8
+	{
+		self.mode
 	}
 
 	pub fn set_control_mode(&self, mode: ControlMode) -> CommandResult<()>
@@ -605,22 +613,15 @@ impl G815Keyboard
 		}
 	}
 
-	pub fn set_scancodes(&self, color_map: ScancodeAssignments)
+	pub fn set_scancodes(&self, color_map: &ScancodeAssignments)
 	{
-		self.clear_colors();
-
 		color_map
 			.iter()
-			.for_each(|(color, scancodes)| 
-			{
-				scancodes
-					.chunks(13)
-					.for_each(|scancode_chunk| 
-					{
-						self.set_13(*color, &scancode_chunk);
-					});
-			});
-
-		self.commit();
+			.for_each(|(color, scancodes)| scancodes
+				.chunks(13)
+				.for_each(|scancode_chunk| 
+				{
+					self.set_13(*color, &scancode_chunk);
+				}));
 	}
 }

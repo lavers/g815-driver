@@ -6,7 +6,8 @@ use regex::Regex;
 
 use crate::windowsystem::ActiveWindowInfo;
 use crate::device::scancode::Scancode;
-use crate::device::rgb::{Theme, Color, ScancodeAssignments};
+use crate::device::rgb::{Theme, ScancodeAssignments};
+use crate::macros::Macro;
 
 #[derive(Debug)]
 pub enum ConfigError
@@ -18,21 +19,42 @@ pub enum ConfigError
 	InvalidConfiguration(String)
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum MacroKeyAssignment
 {
 	#[serde(rename = "simple_action")]
 	SimpleAction(crate::macros::Action),
 	#[serde(rename = "run_macro")]
-	RunMacro(String)
+	NamedMacro(String)
 }
+
+impl MacroKeyAssignment
+{
+	pub fn expand(&self, config: &Configuration) -> Option<Macro>
+	{
+		match self
+		{
+			Self::SimpleAction(action) => Some(Macro::from_action(action.clone())),
+			Self::NamedMacro(macro_name) => config.macros
+				.as_ref()
+				.and_then(|macros| macros.get(macro_name))
+				.map(|macro_| macro_.clone())
+		}
+	}
+}
+
+pub type Keygroup = Vec<Scancode>;
+pub type Keygroups = HashMap<String, Keygroup>;
+
+pub type GkeyAssignments = Option<HashMap<u8, MacroKeyAssignment>>;
+pub type GkeySets = Option<Vec<String>>;
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct ModeProfile
 {
 	theme: Option<String>,
-	gkey_sets: Option<Vec<String>>,
-	gkeys: Option<HashMap<u8, MacroKeyAssignment>>,
+	gkey_sets: GkeySets,
+	gkeys: GkeyAssignments
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -40,13 +62,10 @@ pub struct Profile
 {
 	conditions: Option<ActiveWindowConditions>,
 	pub theme: Option<String>,
-	gkey_sets: Option<Vec<String>>,
-	gkeys: Option<HashMap<u8, MacroKeyAssignment>>,
+	gkey_sets: GkeySets,
+	gkeys: GkeyAssignments,
 	modes: Option<HashMap<u8, ModeProfile>>
 }
-
-pub type Keygroup = Vec<Scancode>;
-pub type Keygroups = HashMap<String, Keygroup>;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Configuration
@@ -55,10 +74,66 @@ pub struct Configuration
 	pub themes: HashMap<String, Theme>,
 	pub keygroups: Keygroups,
 	pub gkey_sets: Option<HashMap<String, HashMap<u8, MacroKeyAssignment>>>,
-	pub macros: Option<HashMap<String, crate::macros::Macro>>
+	pub macros: Option<HashMap<String, Macro>>
 }
 
-impl<'a> Configuration
+trait ProfileKeyAssignment
+{
+	fn gkey_sets(&self) -> &GkeySets;
+	fn gkeys(&self) -> &GkeyAssignments;
+
+	fn gkey_assignment<'a>(&'a self, config: &'a Configuration, key: u8) -> Option<&'a MacroKeyAssignment>
+	{
+		self.gkeys()
+			.as_ref()
+			.and_then(|gkey_assignments| gkey_assignments.get(&key))
+			.or(self.gkey_set_assignment(config, key))
+	}
+
+	fn gkey_set_assignment<'a>(&'a self, config: &'a Configuration, key: u8) -> Option<&'a MacroKeyAssignment>
+	{
+		self.gkey_sets().as_ref().and_then(|gkey_sets| 
+		{
+			for gkey_set_name in gkey_sets.iter().rev()
+			{
+				if let Some(assignment) = config.gkey_set_assignment(gkey_set_name, key)
+				{
+					return Some(assignment)
+				}
+			}
+
+			None
+		})
+	}
+}
+
+impl ProfileKeyAssignment for Profile
+{
+	fn gkey_sets(&self) -> &GkeySets
+	{
+		&self.gkey_sets
+	}
+
+	fn gkeys(&self) -> &GkeyAssignments
+	{
+		&self.gkeys
+	}
+}
+
+impl ProfileKeyAssignment for ModeProfile
+{
+	fn gkey_sets(&self) -> &GkeySets
+	{
+		&self.gkey_sets
+	}
+
+	fn gkeys(&self) -> &GkeyAssignments
+	{
+		&self.gkeys
+	}
+}
+
+impl Configuration
 {
 	pub fn config_file_location() -> &'static str
 	{
@@ -104,6 +179,32 @@ impl<'a> Configuration
 	{
 		self.themes.get(theme)
 			.and_then(|theme| theme.scancode_assignments(&self.keygroups))
+	}
+
+	pub fn macro_for_gkey(&self, current_profile: &str, mode: u8, gkey: u8) -> Option<Macro>
+	{
+		self.profiles
+			.get(current_profile)
+			.and_then(|profile| 
+			{
+				profile.modes
+					.as_ref()
+					.and_then(|modes| modes
+						.get(&mode)
+						.and_then(|mode_profile| mode_profile
+							.gkey_assignment(self, gkey)))
+					.or(profile.gkey_assignment(self, gkey))
+					.and_then(|assignment| assignment.expand(self))
+			})
+	}
+
+	pub fn gkey_set_assignment(&self, gkey_set: &str, key: u8) -> Option<&MacroKeyAssignment>
+	{
+		self.gkey_sets
+			.as_ref()
+			.and_then(|gkey_sets| gkey_sets
+				.get(gkey_set)
+				.and_then(|gkey_set| gkey_set.get(&key)))
 	}
 }
 

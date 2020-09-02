@@ -236,3 +236,43 @@ entering software mode
 03 00 volume wheel stopped
 03 10 volume wheel down..?
 03 20 volume wheel up..?
+
+
+effects
+----------------------
+0f 1a [group] [effect] [padding?] [data] 01 00 00 00
+
+cycle
+----------------------
+0f 1a 01 03 (00){5} [duration high] [duration low] [brightness] 00 00 01 (00){3}
+0f 1a 00 02 (00){5} [duration high] [duration low] [brightness] 00 00 01 (00){3}
+0f 6a [00/01] [00] f8 [4f/3d] - animation offset of some sort..? sync logo with keys?
+
+color wave
+----------------------
+0f 1a 01 04 (00){6} [duration low] 01 [brightness] [duration high] [direction] 01 (00){3}
+doesn't seem to set the logo group?
+directions:
+	01 horizontal
+	02 vertical
+	03 center out
+	08 center in
+	06 reverse horizontal
+	07 reverse vertical
+
+breathing
+----------------------
+0f 1a 01 02 00 ff ff [duration high] [duration low] 00 [brightness] (00){3} 01 (00){3}
+0f 1a 00 03 00 ff ff [duration high] [duration low] 00 [brightness] (00){3} 01 (00){3}
+
+ripple
+----------------------
+0f 6a 00 00 f7 49
+0f 6a 01 00 f7 49
+0f 1a 01 05 [r] [g] [b] 00 00 [duration] (00){4} 01 (00){3}
+0f 1a 00 01 00 ff ff 02 (00){6} 01 (00){3}
+
+fixed
+----------------------
+0f 1a 01 01 [r] [g] [b] 02 (00){6} 01 (00){3}
+0f 1a 00 01 [r] [g] [b] 02 (00){6} 01 (00){3}

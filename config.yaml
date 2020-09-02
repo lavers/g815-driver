@@ -1,6 +1,9 @@
 profiles:
     default:
         theme: default
+        gkeys:
+            1: 
+                run_macro: message_every_second
 
     tmux:
         conditions:
@@ -44,6 +47,7 @@ gkey_sets:
                 key_press: "ctrl+shift+tab"
 
 macros:
+
     click_every_second:
         activation_type: toggle
         steps:
@@ -52,6 +56,16 @@ macros:
               duration: 20
             - action: delay
               duration: 1000
+
+    message_every_second:
+        activation_type: toggle
+        steps:
+            - action: 
+                  debug_print: "macro has run"
+              duration: 0
+            - action: delay
+              duration: 1000
+                
     tmux_next_pane:
         activation_type: singular
         steps:
@@ -100,4 +114,3 @@ keygroups:
     arrows: [Up,Down,Left,Right]
     modifiers: [LeftControl,LeftShift,LeftAlt,LeftMeta,RightControl,RightShift,RightAlt,RightMeta,ContextMenu]
     controlkeys: [PrintScreen,ScrollLock,Pause,Insert,Home,PageUp,Delete,End,PageDown]
-

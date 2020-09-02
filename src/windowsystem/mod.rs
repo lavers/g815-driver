@@ -1,11 +1,11 @@
 use std::time::Duration;
 use std::env;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use std::sync::mpsc::{Sender, Receiver};
 
 use serde::{Serialize, Deserialize};
 
-use crate::{SharedState, MainThreadEvent};
+use crate::{SharedState, MainThreadSignal};
 use crate::config::ActiveWindowConditions;
 
 mod x11;
@@ -77,25 +77,20 @@ impl dyn WindowSystem where Self: Send + Sync
 	}
 
 	pub fn active_window_watcher_thread(
-		state: Arc<RwLock<SharedState>>, 
+		state: Arc<SharedState>, 
 		rx: Receiver<()>, 
-		tx: Sender<MainThreadEvent>)
+		tx: Sender<MainThreadSignal>)
 	{
 		let mut last_active_window = None;
 
 		// receiving anything should be interpreted as a shutdown event
 		while rx.try_recv().is_err()
 		{
-			let active_window = {
-				// make sure state is not locked for any longer
-				// than it needs to use the window_system to prevent locks
-				let state = state.read().unwrap();
-				state.window_system.active_window_info()
-			};
+			let active_window = state.window_system.active_window_info();
 
 			if last_active_window != active_window
 			{
-				tx.send(MainThreadEvent::ActiveWindowChanged(active_window.clone()));
+				tx.send(MainThreadSignal::ActiveWindowChanged(active_window.clone()));
 				last_active_window = active_window;
 			}
 

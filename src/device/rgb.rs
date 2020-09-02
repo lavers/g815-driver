@@ -21,6 +21,11 @@ impl Color
 	{
 		Color { r, g, b }
 	}
+
+	pub fn black() -> Self
+	{
+		Self::new(0, 0, 0)
+	}
 }
 
 impl Serialize for Color

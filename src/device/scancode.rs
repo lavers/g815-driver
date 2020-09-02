@@ -5,7 +5,7 @@ use serde::{Serialize, Deserialize};
 
 macro_attr!
 {
-	#[derive(Copy, Clone, Debug, PartialEq, Eq, 
+	#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash,
 		Serialize, Deserialize, 
 		EnumDisplay!, EnumFromStr!, IterVariants!(Scancodes))]
 	pub enum Scancode 
@@ -72,6 +72,9 @@ macro_attr!
 		G3,
 		G4,
 		G5,
+		G6,
+		G7,
+		G8,
 		Logo = 0xd2,
 		MediaPrevious = 0x9e,
 		MediaNext = 0x9d,
@@ -81,6 +84,22 @@ macro_attr!
 
 impl Scancode
 {
+	pub fn for_gkey(gkey_number: u8) -> Option<Self>
+	{
+		match gkey_number
+		{
+			1 => Some(Self::G1),
+			2 => Some(Self::G2),
+			3 => Some(Self::G3),
+			4 => Some(Self::G4),
+			5 => Some(Self::G5),
+			6 => Some(Self::G6),
+			7 => Some(Self::G7),
+			8 => Some(Self::G8),
+			_ => None
+		}
+	}
+
 	pub fn rgb_id(&self) -> u8
 	{
 		let id = *self as u8;

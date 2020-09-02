@@ -38,6 +38,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "dbus"
+version = "0.8.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5cd9e78c210146a1860f897db03412fd5091fd73100778e43ee255cca252cf32"
+dependencies = [
+ "libc",
+ "libdbus-sys",
+]
+
+[[package]]
 name = "dtoa"
 version = "0.4.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -54,6 +64,7 @@ name = "g815-driver"
 version = "0.1.0"
 dependencies = [
  "ctrlc",
+ "dbus",
  "enum_derive",
  "hidapi",
  "macro-attr",
@@ -95,6 +106,15 @@ name = "libc"
 version = "0.2.74"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a2f02823cf78b754822df5f7f268fb59822e7296276d3e069d8e8cb26a14bd10"
+
+[[package]]
+name = "libdbus-sys"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dc12a3bc971424edbbf7edaf6e5740483444db63aa8e23d3751ff12a30f306f0"
+dependencies = [
+ "pkg-config",
+]
 
 [[package]]
 name = "linked-hash-map"
