@@ -38,7 +38,7 @@ impl MacroKeyAssignment
 			Self::NamedMacro(macro_name) => config.macros
 				.as_ref()
 				.and_then(|macros| macros.get(macro_name))
-				.map(|macro_| macro_.clone())
+				.cloned()
 		}
 	}
 }
@@ -87,7 +87,7 @@ trait ProfileKeyAssignment
 		self.gkeys()
 			.as_ref()
 			.and_then(|gkey_assignments| gkey_assignments.get(&key))
-			.or(self.gkey_set_assignment(config, key))
+			.or_else(|| self.gkey_set_assignment(config, key))
 	}
 
 	fn gkey_set_assignment<'a>(&'a self, config: &'a Configuration, key: u8) -> Option<&'a MacroKeyAssignment>
@@ -144,17 +144,17 @@ impl Configuration
 	pub fn load() -> Result<Self, ConfigError>
 	{
 		std::fs::read_to_string(Self::config_file_location())
-			.map_err(|e| ConfigError::UnableToOpen(e))
+			.map_err(ConfigError::UnableToOpen)
 			.and_then(|yaml_string| serde_yaml::from_str(&yaml_string)
-				.map_err(|e| ConfigError::ParseError(e)))
+				.map_err(ConfigError::ParseError))
 	}
 
 	pub fn save(&self) -> Result<(), ConfigError>
 	{
 		serde_yaml::to_string(self)
-			.map_err(|e| ConfigError::SerializeError(e))
+			.map_err(ConfigError::SerializeError)
 			.and_then(|yaml_string| std::fs::write(Self::config_file_location(), yaml_string)
-				.map_err(|e| ConfigError::UnableToWrite(e)))
+				.map_err(ConfigError::UnableToWrite))
 	}
 
 	pub fn profile_for_active_window(&self, window: &Option<ActiveWindowInfo>) -> String
@@ -170,7 +170,7 @@ impl Configuration
 					None => false
 				})
 				.map(|(name, _profile)| name.clone())
-				.unwrap_or("default".into()),
+				.unwrap_or_else(|| "default".into()),
 			None => "default".into()
 		}
 	}
@@ -193,7 +193,7 @@ impl Configuration
 						.get(&mode)
 						.and_then(|mode_profile| mode_profile
 							.gkey_assignment(self, gkey)))
-					.or(profile.gkey_assignment(self, gkey))
+					.or_else(|| profile.gkey_assignment(self, gkey))
 					.and_then(|assignment| assignment.expand(self))
 			})
 	}

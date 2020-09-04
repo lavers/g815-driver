@@ -245,7 +245,7 @@ impl X11Interface
 	fn key_combo_to_keysym_sequence(&self, combo: &str) -> Option<Vec<c_uint>>
 	{
 		combo
-			.split("+")
+			.split('+')
 			.map(|key_string| self.key_name_to_symbol(key_string))
 			.collect()
 	}
@@ -349,7 +349,9 @@ impl WindowSystem for X11Interface
 
 	fn send_key_combo(&self, key_combo: &str, pressed: bool, delay: Duration)
 	{
-		self.key_combo_to_keysym_sequence(key_combo)
-			.map(|sequence| self.send_keysym_sequence(&sequence, pressed, delay));
+		if let Some(ref sequence) = self.key_combo_to_keysym_sequence(key_combo)
+		{
+			self.send_keysym_sequence(sequence, pressed, delay);
+		}
 	}
 }

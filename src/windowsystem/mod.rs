@@ -104,9 +104,9 @@ impl ActiveWindowInfo
 	pub fn matches_conditions(&self, conditions: &ActiveWindowConditions) -> bool
 	{
 		if conditions.title.as_ref()
-			.or(conditions.executable.as_ref())
-			.or(conditions.class.as_ref())
-			.or(conditions.class_name.as_ref())
+			.or_else(|| conditions.executable.as_ref())
+			.or_else(|| conditions.class.as_ref())
+			.or_else(|| conditions.class_name.as_ref())
 			.is_none()
 		{
 			return false

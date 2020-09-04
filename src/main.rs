@@ -1,6 +1,8 @@
 #![feature(entry_insert)]
 #![allow(unused_must_use)]
+#![feature(bool_to_option)]
 #![recursion_limit="512"]
+#![allow(clippy::suspicious_else_formatting)]
 
 use std::sync::{Arc, RwLock};
 use std::sync::mpsc::channel;
@@ -51,7 +53,7 @@ fn main()
 
 	let state = Arc::new(SharedState
 	{
-		window_system: window_system,
+		window_system,
 		macro_recording: AtomicBool::new(false),
 		config: RwLock::new(config),
 		active_profile: RwLock::new("default".into())
@@ -79,12 +81,9 @@ fn main()
 
 	{
 		let state = Arc::clone(&state);
-		let main_thread_tx = main_thread_tx.clone();
-		let device_thread_tx = device_thread_tx.clone();
-
 		pool.execute(move || 
 		{
-			device::DeviceThread::new(device, state, main_thread_tx, device_thread_tx)
+			device::DeviceThread::new(device, state, main_thread_tx)
 				.event_loop(device_thread_rx);
 		})
 	}

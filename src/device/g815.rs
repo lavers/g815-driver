@@ -1,7 +1,6 @@
 use hidapi::{HidApi, HidDevice, HidResult, HidError};
 
-use std::collections::HashMap;
-use std::sync::Mutex;
+use std::collections::{HashMap, VecDeque};
 
 use crate::device::{DeviceEvent, KeyType, MediaKey, Capability, CapabilityData};
 use crate::device::rgb::{Color, ScancodeAssignments};
@@ -92,11 +91,12 @@ pub type CommandResult<T> = Result<T, CommandError>;
 
 pub struct G815Keyboard
 {
-	device: Mutex<HidDevice>,
+	device: HidDevice,
 	capabilities: HashMap<Capability, CapabilityData>,
 	capability_id_cache: HashMap<u8, Capability>,
 	key_bitmasks: HashMap<KeyType, u8>,
-	mode_leds: u8
+	mode_leds: u8,
+	interrupt_queue: VecDeque<Vec<u8>>
 }
 
 impl G815Keyboard
@@ -105,20 +105,18 @@ impl G815Keyboard
 	{
 		hidapi
 			.device_list()
-			.find(|dev_info| 
-			{
-				return dev_info.vendor_id() == VID
-					&& dev_info.product_id() == PID
-					&& dev_info.interface_number() == 1;
-			})
+			.find(|dev_info| dev_info.vendor_id() == VID
+				&& dev_info.product_id() == PID
+				&& dev_info.interface_number() == 1)
 			.ok_or(HidError::OpenHidDeviceError)
 			.and_then(|dev_info| dev_info.open_device(&hidapi))
 			.map(|device| G815Keyboard 
 			{
-				device: Mutex::new(device), 
+				device, 
 				capabilities: HashMap::new(),
 				capability_id_cache: HashMap::new(),
 				key_bitmasks: HashMap::new(),
+				interrupt_queue: VecDeque::new(),
 				mode_leds: 0x1
 			})
 	}
@@ -126,14 +124,12 @@ impl G815Keyboard
 	fn serial_number(&self) -> String
 	{
 		self.device
-			.lock()
-			.unwrap()
 			.get_serial_number_string()
 			.unwrap()
 			.unwrap()
 	}
 
-	fn write(&self, command: u16, data: &[u8]) -> CommandResult<Vec<u8>>
+	fn write(&mut self, command: u16, data: &[u8]) -> CommandResult<Vec<u8>>
 	{
 		let command_bytes = command as u16;
 
@@ -161,10 +157,8 @@ impl G815Keyboard
 		}
 		*/
 
-		let device = self.device.lock().unwrap();
-
-		device.set_blocking_mode(true)?;
-		device.write(&buffer)?;
+		self.device.set_blocking_mode(true)?;
+		self.device.write(&buffer)?;
 
 		// println!("OUT(20) > {:0x?}", &buffer);
 
@@ -172,57 +166,52 @@ impl G815Keyboard
 		{
 			buffer.clear();
 			buffer.resize(20, 0);
-			let bytes_read = device.read(&mut buffer)?;
+			let bytes_read = self.device.read(&mut buffer)?;
 			buffer.truncate(bytes_read);
 
-			if bytes_read >= 5 
+			if bytes_read >= 4 && buffer[..4] == expected_return
 			{
-				if &buffer[..4] == expected_return
-				{
-					//println!("ACK({:2}) > {:0x?}", bytes_read, &buffer);
+				//println!("ACK({:2}) > {:0x?}", bytes_read, &buffer);
 
-					buffer.drain(0..std::cmp::min(bytes_read, 4));
-					device.set_blocking_mode(false)?;
-					return Ok(buffer);
-				}
-				else
-				{
-					let mut error_response = expected_return.to_vec();
-					error_response.insert(2, 0xff);
+				buffer.drain(0..std::cmp::min(bytes_read, 4));
+				self.device.set_blocking_mode(false)?;
+				return Ok(buffer);
+			}
+			else if bytes_read >= 5
+			{
+				let mut error_response = expected_return.to_vec();
+				error_response.insert(2, 0xff);
 
-					if &buffer[..5] == error_response.as_slice()
-					{
-						println!("OUT(20) > {:0x?}", &buffer);
-						println!("ERR({:2}) > {:0x?}", bytes_read, &buffer);
-						return Err(CommandError::Failure(
-							format!("device didn't like command {:#?}", &expected_return).into()))
-					}
+				if &buffer[..5] == error_response.as_slice()
+				{
+					println!("OUT(20) > {:0x?}", &buffer);
+					println!("ERR({:2}) > {:0x?}", bytes_read, &buffer);
+					return Err(CommandError::Failure(
+						format!("device didn't like command {:#?}", &expected_return)))
 				}
 			}
-			else
-			{
-				//println!("IN ({:2}) > {:0x?}", bytes_read, &buffer);
-			}
+
+			self.interrupt_queue.push_back(buffer.clone());
 		}
 
 		panic!("device sent 10 interrupts that seem to be nonsense");
 	}
 
-	fn execute(&self, command: Command, data: &[u8]) -> CommandResult<Vec<u8>>
+	fn execute(&mut self, command: Command, data: &[u8]) -> CommandResult<Vec<u8>>
 	{
 		self.write(command as u16, data)
 	}
 
-	fn version(&self, firmware_bank: u8) -> CommandResult<String>
+	fn version(&mut self, firmware_bank: u8) -> CommandResult<String>
 	{
-		let data = self.execute(Command::GetVersion, &vec![firmware_bank])?;
+		let data = self.execute(Command::GetVersion, &[firmware_bank])?;
 
 		let name = String::from_utf8_lossy(&data[1..4]);
 		let major = 100 + (10 * (data[4] as u16 >> 4)) + (data[4] as u16 & 0xf);
 		let minor = (10 * (data[5] as u16 >> 4)) + (data[5] as u16 & 0xf);
 		let build = (10 * (data[7] as u16 >> 4)) + (data[7] as u16 & 0xf);
 
-		Ok(format!("{}: {}.{}.{}", name.trim(), major, minor, build).to_string())
+		Ok(format!("{}: {}.{}.{}", name.trim(), major, minor, build))
 	}
 
 	pub fn capability_data(&self, capability: Capability) -> CommandResult<&CapabilityData>
@@ -238,7 +227,7 @@ impl G815Keyboard
 
 	pub fn load_capabilities(&mut self) -> CommandResult<()>
 	{
-		let capabilities = vec![
+		let capabilities = [
 			Capability::GKeys,
 			Capability::ModeSwitching,
 			Capability::GameMode,
@@ -260,7 +249,7 @@ impl G815Keyboard
 	{
 		let id_result = self.execute(
 			Command::CapabilityInfo, 
-			&vec![((capability as u16) >> 8) as u8, capability as u8])?;
+			&[((capability as u16) >> 8) as u8, capability as u8])?;
 
 		let capability_data = match id_result[0]
 		{
@@ -317,12 +306,12 @@ impl G815Keyboard
 		}
 	}
 
-	pub fn bootloader_version(&self) -> CommandResult<String>
+	pub fn bootloader_version(&mut self) -> CommandResult<String>
 	{
 		self.version(0x00)
 	}
 
-	pub fn firmware_version(&self) -> CommandResult<String>
+	pub fn firmware_version(&mut self) -> CommandResult<String>
 	{
 		self.version(0x01)
 	}
@@ -333,8 +322,14 @@ impl G815Keyboard
 			.map(|data| data.key_count.unwrap_or(0))
 	}
 
+	pub fn gkey_count(&self) -> CommandResult<u8>
+	{
+		self.capability_data(Capability::ModeSwitching)
+			.map(|data| data.key_count.unwrap_or(0))
+	}
+
 	/// Sets a group of 13 scancodes to a single color
-	pub fn set_13(&self, color: Color, keys: &[Scancode]) -> CommandResult<()>
+	pub fn set_13(&mut self, color: Color, keys: &[Scancode]) -> CommandResult<()>
 	{
 		let mut data = vec![color.r, color.g, color.b];
 		keys.iter().for_each(|key| data.push(key.rgb_id()));
@@ -342,7 +337,7 @@ impl G815Keyboard
 	}
 
 	/// Sets 4 keys to 4 separate colors
-	pub fn set_4(&self, keys: &[(Scancode, Color)]) -> CommandResult<()>
+	pub fn set_4(&mut self, keys: &[(Scancode, Color)]) -> CommandResult<()>
 	{
 		keys.chunks(4).map(|keys| 
 		{
@@ -362,7 +357,7 @@ impl G815Keyboard
 		.collect()
 	}
 
-	pub fn commit(&self) -> CommandResult<()>
+	pub fn commit(&mut self) -> CommandResult<()>
 	{
 		self.execute(Command::Commit, &[0; 0]).map(|_| ())
 	}
@@ -393,33 +388,33 @@ impl G815Keyboard
 		self.mode_leds
 	}
 
-	pub fn set_control_mode(&self, mode: ControlMode) -> CommandResult<()>
+	pub fn set_control_mode(&mut self, mode: ControlMode) -> CommandResult<()>
 	{
 		self.execute(Command::SetControlMode, &[mode as u8; 1]).map(|_| ())
 	}
 
 	/// Turns the MR (macro record) light on or off on the keyboard
 	/// (doesn't appear to have any effect other than the led)
-	pub fn set_macro_recording(&self, recording: bool) -> CommandResult<()>
+	pub fn set_macro_recording(&mut self, recording: bool) -> CommandResult<()>
 	{
 		self.execute(Command::SetMacroRecordMode, &[recording as u8; 1]).map(|_| ())
 	}
 
-	pub fn set_gkeys_mode(&self, mode: GKeysMode) -> CommandResult<()>
+	pub fn set_gkeys_mode(&mut self, mode: GKeysMode) -> CommandResult<()>
 	{
 		self.execute(Command::SetGKeysMode, &[mode as u8; 1]).map(|_| ())
 	}
 
 	/// Sets an effect on a group. duration is in milliseconds, brightness
 	/// is a 0-100 percentage.
-	pub fn set_effect(&self, 
+	pub fn set_effect(&mut self, 
 		group: EffectGroup, 
 		effect: Effect, 
 		color: Color, 
 		duration: u16,
 		brightness: u8) -> CommandResult<()>
 	{
-		self.execute(Command::SetEffect, &vec![
+		self.execute(Command::SetEffect, &[
 			 // TODO this structure changes depending on the effect, not as rigid
 			 // as first thought
 			group as u8,
@@ -441,17 +436,17 @@ impl G815Keyboard
 		]).map(|_| ())
 	}
 
-	pub fn solid_color(&self, group: EffectGroup, color: Color) -> CommandResult<()>
+	pub fn solid_color(&mut self, group: EffectGroup, color: Color) -> CommandResult<()>
 	{
 		self.set_effect(group, Effect::Static, color, 2000, 100)
 	}
 
-	pub fn reset_game_mode_keys(&self) -> CommandResult<()>
+	pub fn reset_game_mode_keys(&mut self) -> CommandResult<()>
 	{
 		self.write(Command::ResetGameMode as u16, &[0; 0]).map(|_| ())
 	}
 
-	pub fn add_game_mode_keys(&self, scancodes: &[Scancode]) -> CommandResult<()>
+	pub fn add_game_mode_keys(&mut self, scancodes: &[Scancode]) -> CommandResult<()>
 	{
 		scancodes
 			.iter()
@@ -482,13 +477,13 @@ impl G815Keyboard
 			.collect()
 	}
 
-	pub fn stop_effects(&self)
+	pub fn stop_effects(&mut self)
 	{
 		self.execute(Command::SetEffect, &[0; 1]);
 		self.execute(Command::SetEffect, &[1; 1]);
 	}
 
-	pub fn set_block(&self, color: Color, scancodes: &[Scancode]) -> CommandResult<()>
+	pub fn set_block(&mut self, color: Color, scancodes: &[Scancode]) -> CommandResult<()>
 	{
 		scancodes
 			.chunks(13)
@@ -497,7 +492,7 @@ impl G815Keyboard
 	}
 
 	/// Sets everything to black
-	pub fn clear_colors(&self) -> CommandResult<()>
+	pub fn clear_colors(&mut self) -> CommandResult<()>
 	{
 		self.stop_effects();
 		self.set_block(
@@ -522,7 +517,7 @@ impl G815Keyboard
 	}
 
 	/// Swaps control back to onboard mode
-	pub fn release_control(&self) -> CommandResult<()>
+	pub fn release_control(&mut self) -> CommandResult<()>
 	{
 		self.set_macro_recording(false)?;
 		self.set_gkeys_mode(GKeysMode::Default)?;
@@ -531,14 +526,24 @@ impl G815Keyboard
 
 	pub fn poll_for_events(&mut self) -> Vec<DeviceEvent>
 	{
+		let mut interrupt_buffers: Vec<Vec<u8>> = self.interrupt_queue.drain(..).collect();
 		let mut buffer = [0; 20];
-		let bytes_read = self.device.lock().unwrap().read(&mut buffer).unwrap_or(0);
+		let bytes_read = self.device.read(&mut buffer).unwrap_or(0);
 
-		if bytes_read < 1
+		if bytes_read > 0
 		{
-			return Vec::new()
+			interrupt_buffers.push(buffer.to_vec());
 		}
 
+		interrupt_buffers
+			.iter()
+			.map(|interrupt_data| self.events_from_interrupt(&interrupt_data))
+			.flatten()
+			.collect()
+	}
+
+	pub fn events_from_interrupt(&mut self, buffer: &[u8]) -> Vec<DeviceEvent>
+	{
 		if buffer[0] == 0x03
 		{
 			return self.handle_media_key_interrupt(buffer[1])
@@ -547,7 +552,7 @@ impl G815Keyboard
 		// if it's not a media key or a capability key then ignore it
 		// note: 11 ff 0f 10 [00/01] comes in regularly, seems to be effect cycle done/restarting?
 
-		if buffer[0] != 0x11 || buffer[1] != 0xff
+		if buffer.len() < 3 || buffer[0] != 0x11 || buffer[1] != 0xff
 		{
 			return Vec::new()
 		}
@@ -631,7 +636,7 @@ impl G815Keyboard
 		}
 	}
 
-	pub fn set_scancodes(&self, color_map: &ScancodeAssignments)
+	pub fn set_scancodes(&mut self, color_map: &ScancodeAssignments)
 	{
 		color_map
 			.iter()

@@ -84,7 +84,7 @@ macro_attr!
 
 impl Scancode
 {
-	pub fn for_gkey(gkey_number: u8) -> Option<Self>
+	pub fn from_gkey(gkey_number: u8) -> Option<Self>
 	{
 		match gkey_number
 		{
@@ -98,6 +98,14 @@ impl Scancode
 			8 => Some(Self::G8),
 			_ => None
 		}
+	}
+
+	pub fn gkey_number(&self) -> Option<u8>
+	{
+		let val = *self as u8;
+
+		(val >= 0xb4 && val <= 0xbb)
+			.then_some(val - 0xb3)
 	}
 
 	pub fn rgb_id(&self) -> u8

@@ -159,8 +159,8 @@ impl Theme
 							KeySelection::Multiple(scancodes) => scancodes.clone(),
 							KeySelection::Keygroup(ref group_name) => keygroups
 								.get(group_name)
-								.map(|scancodes| scancodes.clone())
-								.unwrap_or(vec![])
+								.cloned()
+								.unwrap_or_default()
 						})
 						.flatten()
 						.collect();

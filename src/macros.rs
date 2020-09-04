@@ -1,4 +1,5 @@
-use std::sync::mpsc::{Receiver, Sender, TryRecvError};
+use std::sync::mpsc::{Receiver, TryRecvError};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use std::process::{Command, Stdio};
@@ -8,7 +9,6 @@ use serde::{Serialize, Deserialize};
 
 use crate::SharedState;
 use crate::windowsystem::MouseButton;
-use crate::device::DeviceThreadSignal;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Macro
@@ -66,7 +66,7 @@ impl Step
 			Action::DebugPrint(message) => println!("{}", message),
 			Action::RunCommand(command) => 
 			{
-				Command::new(env::var_os("SHELL").unwrap_or("/bin/sh".into()))
+				Command::new(env::var_os("SHELL").unwrap_or_else(|| "/bin/sh".into()))
 					.arg("-c")
 					.arg(command)
 					.stdin(Stdio::null())
@@ -78,7 +78,7 @@ impl Step
 	}
 }
 
-pub enum Signal
+pub enum MacroSignal
 {
 	Stop,
 	ResetCount
@@ -114,9 +114,8 @@ impl Macro
 	pub fn execution_thread(
 		self,
 		state: Arc<SharedState>, 
-		signal_receiver: Receiver<Signal>,
-		device_thread_tx: Sender<DeviceThreadSignal>,
-		macro_id: (u8, u8))
+		rx: Receiver<MacroSignal>,
+		is_finished: Arc<AtomicBool>)
 	{
 		let mut count = self.execution_count();
 		let mut i = 0;
@@ -129,15 +128,15 @@ impl Macro
 				.iter()
 				.for_each(|step| step.execute(&state));
 
-			match signal_receiver.try_recv()
+			match rx.try_recv()
 			{
-				Ok(Signal::ResetCount) => count = self.execution_count(),
-				Ok(Signal::Stop) 
+				Ok(MacroSignal::ResetCount) => count = self.execution_count(),
+				Ok(MacroSignal::Stop) 
 					| Err(TryRecvError::Disconnected) => break,
-				Err(TryRecvError::Empty) => continue
+				Err(TryRecvError::Empty) => ()
 			}
 		}
 
-		device_thread_tx.send(DeviceThreadSignal::MacroFinished(macro_id));
+		is_finished.store(true, Ordering::Relaxed);
 	}
 }
