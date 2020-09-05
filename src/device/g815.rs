@@ -47,12 +47,14 @@ pub enum GKeysMode
 	Software = 0x01
 }
 
+#[allow(dead_code)]
 pub enum EffectGroup
 {
 	Logo = 0x00,
 	Keys = 0x01
 }
 
+#[allow(dead_code)]
 pub enum Effect
 {
 	None,

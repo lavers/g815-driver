@@ -11,8 +11,8 @@ use std::time::Duration;
 use std::thread;
 
 use hidapi::HidApi;
-
 use threadpool::ThreadPool;
+use notify::{Watcher, watcher};
 
 use config::Configuration;
 use windowsystem::{WindowSystem, ActiveWindowInfo};
@@ -73,6 +73,14 @@ fn main()
 	let (device_thread_tx, device_thread_rx) = channel();
 	let (ww_thread_tx, ww_thread_rx) = channel();
 
+	let (config_watcher_tx, config_watcher_rx) = channel();
+	let mut config_watcher = watcher(config_watcher_tx, Duration::from_secs(3)).unwrap();
+	let mut config_file = Configuration::config_file_location();
+	// get the folder containing the config file for watching as
+	// some editors will delete the file, killing the watcher
+	config_file.pop();
+	config_watcher.watch(config_file, notify::RecursiveMode::NonRecursive).unwrap();
+
 	{
 		let state = Arc::clone(&state);
 		let main_thread_tx = main_thread_tx.clone();
@@ -81,6 +89,7 @@ fn main()
 
 	{
 		let state = Arc::clone(&state);
+		let main_thread_tx = main_thread_tx.clone();
 		pool.execute(move || 
 		{
 			device::DeviceThread::new(device, state, main_thread_tx)
@@ -93,6 +102,30 @@ fn main()
 	while !should_exit.load(Ordering::Relaxed)
 	{
 		thread::sleep(Duration::from_millis(10));
+
+		match config_watcher_rx.try_recv()
+		{
+			Ok(notify::DebouncedEvent::NoticeRemove(_path)) => (),
+			Ok(event) => 
+			{
+				println!("{:#?}", &event);
+				let mut config = state.config.write().unwrap();
+				
+				match Configuration::load()
+				{
+					Ok(new_config) => 
+					{
+						*config = new_config;
+						println!("new config loaded: {:#?}", &config);
+						device_thread_tx.send(DeviceThreadSignal::ConfigurationReloaded);
+						let active_window = state.window_system.active_window_info();
+						main_thread_tx.send(MainThreadSignal::ActiveWindowChanged(active_window));
+					},
+					Err(config_error) => println!("error loading new config: {:#?}", &config_error)
+				}
+			},
+			_ => ()
+		}
 
 		if let Ok(message) = main_thread_rx.try_recv()
 		{

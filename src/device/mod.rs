@@ -89,7 +89,8 @@ pub enum DeviceThreadSignal
 {
 	Shutdown,
 	ProfileChanged(String),
-	SetScancodes(ScancodeAssignments)
+	SetScancodes(ScancodeAssignments),
+	ConfigurationReloaded
 }
 
 type MacroState = (Sender<MacroSignal>, Arc<AtomicBool>, ActivationType);
@@ -193,7 +194,8 @@ impl DeviceThread
 					self.last_color_data = Some(scancodes);
 				},
 
-				Ok(DeviceThreadSignal::ProfileChanged(_profile)) => 
+				Ok(DeviceThreadSignal::ConfigurationReloaded)
+					| Ok(DeviceThreadSignal::ProfileChanged(_)) => 
 				{
 					self.blink_timer = Self::BLINK_DELAY;
 					self.stop_and_remove_all_macros();

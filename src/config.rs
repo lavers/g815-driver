@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 use serde::{Serialize, Deserialize, Serializer, Deserializer, de::Error};
 
@@ -135,10 +136,13 @@ impl ProfileKeyAssignment for ModeProfile
 
 impl Configuration
 {
-	pub fn config_file_location() -> &'static str
+	pub fn config_file_location() -> PathBuf
 	{
 		// TODO use xdg_config_dir for non-debug builds
-		"config.yaml"
+
+		let mut path = PathBuf::new();
+		path.push("config.yaml");
+		std::fs::canonicalize(path).unwrap()
 	}
 
 	pub fn load() -> Result<Self, ConfigError>
