@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::fmt;
 
 use serde::{Serialize, Deserialize, Serializer, Deserializer, de::Error};
 
@@ -7,7 +8,7 @@ use regex::Regex;
 
 use crate::windowsystem::ActiveWindowInfo;
 use crate::device::scancode::Scancode;
-use crate::device::rgb::{Theme, ScancodeAssignments};
+use crate::device::rgb::Theme;
 use crate::macros::Macro;
 
 #[derive(Debug)]
@@ -18,6 +19,26 @@ pub enum ConfigError
 	ParseError(serde_yaml::Error),
 	SerializeError(serde_yaml::Error),
 	InvalidConfiguration(String)
+}
+
+impl fmt::Display for ConfigError
+{
+	fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error>
+	{
+		match self
+		{
+			ConfigError::UnableToOpen(io_error) =>
+				write!(f, "unable to read the config file: {}", io_error),
+			ConfigError::UnableToWrite(io_error) =>
+				write!(f, "unable to write the config file: {}", io_error),
+			ConfigError::ParseError(serde_error) =>
+				write!(f, "your configuration file cannot be parsed: {}", serde_error),
+			ConfigError::SerializeError(serde_error) =>
+				write!(f, "your configuration could not be serialized: {}", serde_error),
+			ConfigError::InvalidConfiguration(reason) =>
+				write!(f, "your configuration is invalid: {}", reason)
+		}
+	}
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -50,7 +71,7 @@ pub type Keygroups = HashMap<String, Keygroup>;
 pub type GkeyAssignments = Option<HashMap<u8, MacroKeyAssignment>>;
 pub type GkeySets = Option<Vec<String>>;
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModeProfile
 {
 	theme: Option<String>,
@@ -58,13 +79,14 @@ pub struct ModeProfile
 	gkeys: GkeyAssignments
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Profile
 {
 	conditions: Option<ActiveWindowConditions>,
-	pub theme: Option<String>,
+	theme: Option<String>,
 	gkey_sets: GkeySets,
 	gkeys: GkeyAssignments,
+	pub game_mode_keys: Option<Vec<Scancode>>,
 	modes: Option<HashMap<u8, ModeProfile>>
 }
 
@@ -151,6 +173,16 @@ impl Configuration
 			.map_err(ConfigError::UnableToOpen)
 			.and_then(|yaml_string| serde_yaml::from_str(&yaml_string)
 				.map_err(ConfigError::ParseError))
+			.and_then(|config: Configuration| match config.profiles.contains_key("default")
+			{
+				true => Ok(config),
+				false => Err(ConfigError::InvalidConfiguration("there is no default profile".into()))
+			})
+			.and_then(|config: Configuration| match config.themes.contains_key("default")
+			{
+				true => Ok(config),
+				false => Err(ConfigError::InvalidConfiguration("there is no default theme".into()))
+			})
 	}
 
 	pub fn save(&self) -> Result<(), ConfigError>
@@ -161,45 +193,29 @@ impl Configuration
 				.map_err(ConfigError::UnableToWrite))
 	}
 
-	pub fn profile_for_active_window(&self, window: &Option<ActiveWindowInfo>) -> String
+	pub fn default_profile(&self) -> &Profile
 	{
-		match window
-		{
-			Some(window) => self.profiles
+		self.profiles.get("default").unwrap()
+	}
+
+	pub fn default_theme(&self) -> &Theme
+	{
+		self.themes.get("default").unwrap()
+	}
+
+	pub fn profile_for_active_window(&self, window: &Option<ActiveWindowInfo>) -> (&str, &Profile)
+	{
+		window
+			.as_ref()
+			.and_then(|window| self.profiles
 				.iter()
 				.filter(|(name, _profile)| name.as_str() != "default")
-				.find(|(_name, profile)| match profile.conditions
-				{
-					Some(ref conditions) => window.matches_conditions(conditions),
-					None => false
-				})
-				.map(|(name, _profile)| name.clone())
-				.unwrap_or_else(|| "default".into()),
-			None => "default".into()
-		}
-	}
-
-	pub fn theme_scancode_assignments(&self, theme: &str) -> Option<ScancodeAssignments>
-	{
-		self.themes.get(theme)
-			.and_then(|theme| theme.scancode_assignments(&self.keygroups))
-	}
-
-	pub fn macro_for_gkey(&self, current_profile: &str, mode: u8, gkey: u8) -> Option<Macro>
-	{
-		self.profiles
-			.get(current_profile)
-			.and_then(|profile| 
-			{
-				profile.modes
+				.find_map(|(name, profile)| profile.conditions
 					.as_ref()
-					.and_then(|modes| modes
-						.get(&mode)
-						.and_then(|mode_profile| mode_profile
-							.gkey_assignment(self, gkey)))
-					.or_else(|| profile.gkey_assignment(self, gkey))
-					.and_then(|assignment| assignment.expand(self))
-			})
+					.and_then(|conditions| window
+						.matches_conditions(conditions)
+						.then_some((name.as_str(), profile)))))
+			.unwrap_or_else(|| ("default", self.default_profile()))
 	}
 
 	pub fn gkey_set_assignment(&self, gkey_set: &str, key: u8) -> Option<&MacroKeyAssignment>
@@ -209,6 +225,32 @@ impl Configuration
 			.and_then(|gkey_sets| gkey_sets
 				.get(gkey_set)
 				.and_then(|gkey_set| gkey_set.get(&key)))
+	}
+}
+
+impl Profile
+{
+	pub fn theme<'a>(&'a self, config: &'a Configuration, mode: u8) -> &'a Theme
+	{
+		self.modes
+			.as_ref()
+			.and_then(|modes| modes
+				.get(&mode)
+				.and_then(|mode_profile| mode_profile.theme.as_ref()))
+			.or_else(|| self.theme.as_ref())
+			.and_then(|theme_name| config.themes.get(theme_name))
+			.unwrap_or_else(|| config.default_theme())
+	}
+
+	pub fn macro_for_gkey(&self, config: &Configuration, mode: u8, gkey: u8) -> Option<Macro>
+	{
+		self.modes
+			.as_ref()
+			.and_then(|modes| modes
+				.get(&mode)
+				.and_then(|mode_profile| mode_profile.gkey_assignment(config, gkey)))
+			.or_else(|| self.gkey_assignment(config, gkey))
+			.and_then(|assignment| assignment.expand(config))
 	}
 }
 

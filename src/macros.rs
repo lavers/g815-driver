@@ -51,7 +51,16 @@ pub enum Action
 	#[serde(rename = "delay")]
 	Delay,
 	#[serde(rename = "debug_print")]
-	DebugPrint(String)
+	DebugPrint(String),
+	#[serde(rename = "dbus_method_call")]
+	DbusMethodCall 
+	{
+		destination: String,
+		path: String,
+		interface: String,
+		method: String,
+		arguments: Option<Vec<String>>
+	}
 }
 
 impl Step
@@ -61,8 +70,10 @@ impl Step
 		match &self.action
 		{
 			Action::Delay => std::thread::sleep(Duration::from_millis(self.duration)),
-			Action::MouseClick(button) => state.window_system.send_mouse_click(*button),
-			Action::KeyPress(keysequence) => state.window_system.send_key_combo_press(keysequence),
+			Action::MouseClick(button) => state.window_system
+				.lock().unwrap().send_mouse_click(*button),
+			Action::KeyPress(keysequence) => state.window_system
+				.lock().unwrap().send_key_combo_press(keysequence),
 			Action::DebugPrint(message) => println!("{}", message),
 			Action::RunCommand(command) => 
 			{
@@ -73,6 +84,24 @@ impl Step
 					.stdout(Stdio::null())
 					.stderr(Stdio::null())
 					.spawn();
+			},
+			Action::DbusMethodCall { destination, path, interface, method, arguments } => 
+			{
+				if let Ok(mut message) = dbus::message::Message::new_method_call(
+					destination, 
+					path, 
+					interface, 
+					method)
+				{
+					use dbus::channel::Sender;
+
+					if let Some(arguments) = arguments
+					{
+						message = message.append1(&arguments);
+					}
+
+					state.dbus.lock().unwrap().send(message);
+				}
 			}
 		};
 	}
@@ -88,7 +117,7 @@ impl Macro
 {
 	pub fn from_action(action: Action) -> Self
 	{
-		Macro
+		Self
 		{
 			activation_type: ActivationType::Singular,
 			theme: None,

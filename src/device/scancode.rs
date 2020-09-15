@@ -100,7 +100,7 @@ impl Scancode
 		}
 	}
 
-	pub fn gkey_number(&self) -> Option<u8>
+	pub fn _gkey_number(&self) -> Option<u8>
 	{
 		let val = *self as u8;
 

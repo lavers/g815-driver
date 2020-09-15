@@ -2,6 +2,7 @@ use std::time::Duration;
 use std::env;
 use std::sync::Arc;
 use std::sync::mpsc::{Sender, Receiver};
+use std::fmt;
 
 use serde::{Serialize, Deserialize};
 
@@ -22,15 +23,6 @@ pub enum MouseButton
 	Right
 }
 
-#[derive(PartialEq, Eq, Clone, Debug, Serialize, Deserialize)]
-pub struct ActiveWindowInfo
-{
-	pub title: Option<String>,
-	pub executable: Option<String>,
-	pub class: Option<String>,
-	pub class_name: Option<String>
-}
-
 #[derive(Debug)]
 pub enum WindowSystemError
 {
@@ -38,14 +30,14 @@ pub enum WindowSystemError
 	NotDetected
 }
 
-pub trait WindowSystem where Self: Send + Sync
+pub trait WindowSystem where Self: Send
 {
 	fn send_key_combo(&self, key_combo: &str, pressed: bool, delay: Duration);
 	fn send_mouse_button(&self, button: MouseButton, pressed: bool);
 	fn active_window_info(&self) -> Option<ActiveWindowInfo>;
 }
 
-impl dyn WindowSystem where Self: Send + Sync
+impl dyn WindowSystem where Self: Send
 {
 	pub fn new() -> Result<Box<dyn WindowSystem>, WindowSystemError>
 	{
@@ -86,7 +78,7 @@ impl dyn WindowSystem where Self: Send + Sync
 		// receiving anything should be interpreted as a shutdown event
 		while rx.try_recv().is_err()
 		{
-			let active_window = state.window_system.active_window_info();
+			let active_window = state.window_system.lock().unwrap().active_window_info();
 
 			if last_active_window != active_window
 			{
@@ -97,6 +89,15 @@ impl dyn WindowSystem where Self: Send + Sync
 			std::thread::sleep(Duration::from_millis(400));
 		}
 	}
+}
+
+#[derive(PartialEq, Eq, Clone, Debug, Serialize, Deserialize)]
+pub struct ActiveWindowInfo
+{
+	pub title: Option<String>,
+	pub executable: Option<String>,
+	pub class: Option<String>,
+	pub class_name: Option<String>
 }
 
 impl ActiveWindowInfo
@@ -147,5 +148,16 @@ impl ActiveWindowInfo
 		}
 
 		matches
+	}
+}
+
+impl fmt::Display for ActiveWindowInfo
+{
+	fn fmt(&self, formatter: &mut fmt::Formatter) -> Result<(), fmt::Error>
+	{
+		write!(formatter,
+			"[{}] {}",
+			self.class.as_ref().map(|s| s.as_str()).unwrap_or("unknown class"),
+			self.title.as_ref().map(|s| s.as_str()).unwrap_or("no title"))
 	}
 }

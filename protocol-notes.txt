@@ -240,7 +240,7 @@ entering software mode
 
 effects
 ----------------------
-0f 1a [group] [effect] [padding?] [data] 01 00 00 00
+0f 1a [group] [effect] [r] [g] [b] [padding?] [data] 01 00 00 00
 
 cycle
 ----------------------
@@ -250,7 +250,7 @@ cycle
 
 color wave
 ----------------------
-0f 1a 01 04 (00){6} [duration low] 01 [brightness] [duration high] [direction] 01 (00){3}
+0f 1a 01 04 (00){6} [duration low] [direction] [brightness] [duration high] 01 (00){3}
 doesn't seem to set the logo group?
 directions:
 	01 horizontal
@@ -262,8 +262,8 @@ directions:
 
 breathing
 ----------------------
-0f 1a 01 02 00 ff ff [duration high] [duration low] 00 [brightness] (00){3} 01 (00){3}
-0f 1a 00 03 00 ff ff [duration high] [duration low] 00 [brightness] (00){3} 01 (00){3}
+0f 1a 01 02 [r] [g] [b] [duration high] [duration low] 00 [brightness] (00){3} 01 (00){3}
+0f 1a 00 03 [r] [g] [b] [duration high] [duration low] 00 [brightness] (00){3} 01 (00){3}
 
 ripple
 ----------------------

@@ -19,12 +19,20 @@ impl Color
 {
 	pub fn new(r: u8, g: u8, b: u8) -> Self
 	{
-		Color { r, g, b }
+		Self { r, g, b }
 	}
 
 	pub fn black() -> Self
 	{
 		Self::new(0, 0, 0)
+	}
+}
+
+impl Default for Color
+{
+	fn default() -> Self
+	{
+		Color::black()
 	}
 }
 
@@ -35,9 +43,9 @@ impl Serialize for Color
 		S: Serializer
 	{
 		serializer.serialize_str(format!(
-			"{:02x}{:02x}{:02x}", 
-			self.r, 
-			self.g, 
+			"{:02x}{:02x}{:02x}",
+			self.r,
+			self.g,
 			self.b).as_str())
 	}
 }
@@ -54,15 +62,15 @@ impl<'de> Visitor<'de> for ColorVisitor
 	}
 
 	fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
-	where 
+	where
 		E: Error
 	{
 		if value.len() == 6
 		{
 			u64::from_str_radix(value, 16)
 				.map_err(|e| E::custom(format!(
-					"parse error for hex code {} - {}", 
-					value, 
+					"parse error for hex code {} - {}",
+					value,
 					e.to_string())))
 				.and_then(|number| self.visit_u64(number))
 		}
@@ -73,17 +81,17 @@ impl<'de> Visitor<'de> for ColorVisitor
 	}
 
 	fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E>
-	where 
+	where
 		E: Error
 	{
 		Ok(Color::new(
-			(value >> 16 & 0xff) as u8, 
+			(value >> 16 & 0xff) as u8,
 			(value >> 8 & 0xff) as u8,
 			value as u8))
 	}
 
 	fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E>
-	where 
+	where
 		E: serde::de::Error
 	{
 		if value < 0
@@ -116,6 +124,13 @@ pub enum Effect
 	ColorWave = 0x04 // doesn't seem to set the logo at all?
 }
 
+#[derive(Copy, Clone, Eq, PartialEq, Hash)]
+pub enum EffectGroup
+{
+	Logo = 0x00,
+	Keys = 0x01
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum KeySelection
 {
@@ -127,21 +142,49 @@ pub enum KeySelection
 	Keygroup(String)
 }
 
+#[derive(Copy, Clone, Eq, PartialEq, Hash, Debug, Serialize, Deserialize)]
+pub enum EffectDirection
+{
+	Horizontal = 0x01,
+	Vertical = 0x02,
+	CenterOut = 0x03,
+	CenterIn = 0x08,
+	ReverseHorizontal = 0x06,
+	ReverseVertical = 0x07
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum EffectConfiguration
+{
+	#[serde(rename = "none")]
+	None,
+	#[serde(rename = "static")]
+	Static { color: Color },
+	#[serde(rename = "breathing")]
+	Breathing { color: Color, duration: u16, brightness: u8 },
+	#[serde(rename = "cycle")]
+	Cycle { duration: u16, brightness: u8 },
+	#[serde(rename = "color_wave")]
+	ColorWave { direction: EffectDirection, duration: u16, brightness: u8 },
+	#[serde(rename = "ripple")]
+	Ripple { color: Color, duration: u16 }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum Theme
 {
 	#[serde(rename = "custom")]
 	Custom(HashMap<Color, Vec<KeySelection>>),
 	#[serde(rename = "effect")]
-	Effect(Effect)
+	Effect(EffectConfiguration)
 }
 
 pub type ScancodeAssignments = HashMap<Color, Vec<Scancode>>;
 
 impl Theme
 {
-	/// Turns this theme's set of color to user-friendly keyselections assignments 
-	/// into a device-friendly map of color -> scancodes. If this theme is an Effect 
+	/// Turns this theme's set of color to user-friendly keyselections assignments
+	/// into a device-friendly map of color -> scancodes. If this theme is an Effect
 	/// theme, this will return None.
 	pub fn scancode_assignments(&self, keygroups: &Keygroups) -> Option<ScancodeAssignments>
 	{

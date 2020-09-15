@@ -1,6 +1,8 @@
 profiles:
     default:
         theme: default
+        game_mode_keys:
+            - Down
         gkey_sets:
             - clipboard_shortcuts
         gkeys:
@@ -28,6 +30,13 @@ profiles:
                 run_macro: repeat_message_every_second
             4: 
                 run_macro: single_message_every_second
+            5:
+                simple_action:
+                    dbus_method_call:
+                        destination: org.dharkael.Flameshot
+                        path: /
+                        interface: org.dharkael.Flameshot
+                        method: captureScreen
 
     spotify:
         conditions:
@@ -110,19 +119,28 @@ macros:
 
 themes:
     default:
-        custom:
-            ff0000:
-                - multiple: [Q, W, E, R, T, Y]
-                - keygroup: controlkeys
-            00ff00:
-                - multiple: [A, S, D, F, G]
-                - single: Enter
-            ff00ff:
-                - keygroup: modifiers
-            0000ff:
-                - keygroup: numpad
-            f59342:
-                - keygroup: mediakeys
+        effect:
+            static:
+                color: ff00ff
+                direction: Vertical
+                duration: 4000
+                brightness: 100
+
+#        custom:
+#            ff0000:
+#                - multiple: [Q, W, E, R, T, Y]
+#                - keygroup: controlkeys
+#            00ff00:
+#                - multiple: [A, S, D, F, G]
+#                - single: Enter
+#            ff00ff:
+#                - keygroup: modifiers
+#            0000ff:
+#                - keygroup: numpad
+#            f59342:
+#                - keygroup: mediakeys
+#            ffffff:
+#                - single: Backspace
     tmux:
         custom:
             00ffff:
