@@ -42,11 +42,10 @@ impl fmt::Display for ConfigError
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(untagged)]
 pub enum MacroKeyAssignment
 {
-	#[serde(rename = "simple_action")]
 	SimpleAction(crate::macros::Action),
-	#[serde(rename = "run_macro")]
 	NamedMacro(String)
 }
 
@@ -163,7 +162,7 @@ impl Configuration
 		// TODO use xdg_config_dir for non-debug builds
 
 		let mut path = PathBuf::new();
-		path.push("config.yaml");
+		path.push("config.yml");
 		std::fs::canonicalize(path).unwrap()
 	}
 

@@ -11,6 +11,8 @@ use crossbeam::{Receiver, TryRecvError};
 
 use crate::{SharedState, MainThreadSignal};
 use crate::macros::{Macro, MacroSignal, ActivationType};
+use crate::dbus::DBusSignal;
+use crate::windowsystem::WindowSystemSignal;
 use super::rgb::{ScancodeAssignments, EffectGroup, EffectConfiguration, Theme, Color};
 use super::scancode::Scancode;
 use super::{Device, DeviceEvent, KeyType, MediaKey};
@@ -21,7 +23,8 @@ pub enum DeviceThreadSignal
 {
 	Shutdown,
 	ProfileChanged,
-	ConfigurationReloaded
+	ConfigurationReloaded,
+	MediaStateChanged
 }
 
 enum CurrentLightingState
@@ -35,13 +38,16 @@ pub struct DeviceThread
 	device: Box<dyn Device>,
 	state: Arc<SharedState>,
 	main_thread_tx: Sender<MainThreadSignal>,
+	dbus_tx: Sender<DBusSignal>,
+	window_system_tx: Sender<WindowSystemSignal>,
 	// map of mode number -> gkey number = Current macro state
 	macro_states: HashMap<u8, HashMap<u8, MacroState>>,
 	lighting_state: CurrentLightingState,
 	blink_timer: u64,
 	blink_state: bool,
 	active_mode: u8,
-	mode_count: u8
+	mode_count: u8,
+	overrides: HashMap<Scancode, Color>
 }
 
 impl DeviceThread
@@ -53,6 +59,8 @@ impl DeviceThread
 	pub fn new(
 		device: Box<dyn Device>,
 		state: Arc<SharedState>,
+		dbus_tx: Sender<DBusSignal>,
+		window_system_tx: Sender<WindowSystemSignal>,
 		main_thread_tx: Sender<MainThreadSignal>) -> Self
 	{
 		let mode_count = device.mode_count().unwrap_or(0);
@@ -62,12 +70,15 @@ impl DeviceThread
 			device,
 			state,
 			main_thread_tx,
+			window_system_tx,
+			dbus_tx,
 			mode_count,
 			macro_states: HashMap::new(),
 			lighting_state: CurrentLightingState::Effect(EffectConfiguration::None),
 			blink_timer: 0,
 			blink_state: false,
-			active_mode: 1
+			active_mode: 1,
+			overrides: HashMap::new()
 		}
 	}
 
@@ -127,6 +138,31 @@ impl DeviceThread
 					self.blink_timer = Self::BLINK_DELAY;
 					self.stop_and_remove_all_macros();
 					self.apply_profile();
+					self.apply_overrides();
+					self.device.commit();
+				},
+
+				Ok(DeviceThreadSignal::MediaStateChanged) =>
+				{
+					use crate::media::PlayerStatus;
+
+					let media_state = { self.state.media_state.read().unwrap().clone() };
+					let no_media = media_state.player_status == PlayerStatus::NoMedia;
+					let red = Color::new(255, 0, 0);
+
+					self.set_override(Scancode::Mute, media_state.muted.then_some(red));
+					self.set_override(Scancode::MediaPrevious, no_media.then_some(Color::black()));
+					self.set_override(Scancode::MediaNext, no_media.then_some(Color::black()));
+					self.set_override(Scancode::MediaPlayPause, match media_state.player_status
+					{
+						PlayerStatus::Playing => None,
+						PlayerStatus::Paused => Some(red),
+						PlayerStatus::NoMedia => Some(Color::black())
+					});
+
+					self.apply_profile();
+					self.apply_overrides();
+					self.device.commit();
 				}
 			}
 
@@ -157,11 +193,12 @@ impl DeviceThread
 
 		match theme
 		{
-			Theme::Custom(_assignments) =>
+			Theme::Static(_assignments) =>
 			{
 				// fine to unwrap this, None is only returned for Theme::Effect variants
 				let scancodes = theme.scancode_assignments(&config.keygroups).unwrap();
-				self.device.clear();
+				//self.device.clear(); this is causing flickering
+				self.device.set_all(Color::black());
 				self.device.apply_scancode_assignments(&scancodes);
 				self.device.commit();
 				self.lighting_state = CurrentLightingState::Custom(scancodes);
@@ -173,6 +210,40 @@ impl DeviceThread
 				self.device.set_effect(group, effect);
 				self.lighting_state = CurrentLightingState::Effect(effect.clone());
 			}
+		}
+	}
+
+	fn set_override<C>(&mut self, scancode: Scancode, color: C)
+	where
+		C: Into<Option<Color>> + std::fmt::Debug
+	{
+		debug!("set override for {:?} to {:?}", &scancode, &color);
+		if let Some(color) = color.into()
+		{
+			self.overrides.insert(scancode, color);
+		}
+		else
+		{
+			self.overrides.remove(&scancode);
+		}
+	}
+
+	fn apply_overrides(&mut self)
+	{
+		if let CurrentLightingState::Custom(_) = &self.lighting_state
+		{
+			let mut assignments = HashMap::new();
+
+			for (scancode, color) in &self.overrides
+			{
+				assignments
+					.entry(*color)
+					.or_insert(Vec::new())
+					.push(*scancode);
+			}
+
+			let assignments = assignments.drain().collect();
+			self.device.apply_scancode_assignments(&assignments);
 		}
 	}
 
@@ -205,10 +276,8 @@ impl DeviceThread
 				self.stop_all_hold_to_repeat_macros();
 			},
 
-			DeviceEvent::MediaKeyDown(key) => self.state.window_system
-				.lock()
-				.unwrap()
-				.send_key_combo_press(match key
+			DeviceEvent::MediaKeyDown(key) => self.window_system_tx
+				.send(WindowSystemSignal::SendKeyCombo(match key
 				{
 					MediaKey::Mute => "XF86AudioMute",
 					MediaKey::PlayPause => "XF86AudioPlay",
@@ -216,7 +285,8 @@ impl DeviceThread
 					MediaKey::Previous => "XF86AudioPrev",
 					MediaKey::VolumeUp => "XF86AudioRaiseVolume",
 					MediaKey::VolumeDown => "XF86AudioLowerVolume"
-				}),
+				}.to_string()))
+				.unwrap_or(()),
 
 			_ => ()
 		}
@@ -345,20 +415,17 @@ impl DeviceThread
 			debug!("starting macro: {:#?}", &macro_);
 
 			let (macro_tx, macro_rx) = channel();
-			let state = Arc::clone(&self.state);
 			let stopped = Arc::new(AtomicBool::new(false));
 			let macro_thread_stopped = Arc::clone(&stopped);
 
 			self.current_mode_macro_states().insert(gkey_number,
 				(macro_tx, stopped, macro_.activation_type));
 
-			self.main_thread_tx.send(MainThreadSignal::RunMacroInPool(Box::new(move ||
+			self.main_thread_tx.send(MainThreadSignal::RunMacroInPool(Box::new(
 			{
-				Macro::execution_thread(
-					macro_,
-					state,
-					macro_rx,
-					macro_thread_stopped)
+				let window_system_tx = self.window_system_tx.clone();
+				let dbus_tx = self.dbus_tx.clone();
+				move || macro_.execute(macro_rx, window_system_tx, dbus_tx, macro_thread_stopped)
 			})));
 		}
 	}

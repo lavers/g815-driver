@@ -1,12 +1,14 @@
 use serde::{Serialize, Deserialize};
 
 use scancode::Scancode;
-use rgb::{Color, ScancodeAssignments, EffectConfiguration, EffectGroup};
+use rgb::{ScancodeAssignments, EffectConfiguration, EffectGroup};
+use color::Color;
 
 pub mod g815;
 pub mod scancode;
 pub mod rgb;
 pub mod thread;
+pub mod color;
 
 #[derive(PartialEq, Eq, Hash, Clone, Copy, Debug, Deserialize, Serialize)]
 pub enum KeyType
@@ -119,12 +121,14 @@ pub trait Device where Self: std::fmt::Display + Send
 		self.set_effect(EffectGroup::Logo, &EffectConfiguration::None);
 	}
 
-	/// Sets everything to black
 	fn clear(&mut self) -> CommandResult<()>
 	{
 		self.stop_effects();
-		self.set_13(
-			Color::new(0, 0, 0),
-			&Scancode::iter_variants().collect::<Vec<Scancode>>())
+		self.set_all(Color::black())
+	}
+
+	fn set_all(&mut self, color: Color) -> CommandResult<()>
+	{
+		self.set_13(color, &Scancode::iter_variants().collect::<Vec<Scancode>>())
 	}
 }

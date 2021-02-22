@@ -8,7 +8,9 @@ macro_attr!
 	#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash,
 		Serialize, Deserialize, 
 		EnumDisplay!, EnumFromStr!, IterVariants!(Scancodes))]
-	pub enum Scancode 
+	#[repr(u8)]
+	#[serde(rename_all = "snake_case")]
+	pub enum Scancode
 	{
 		// standard usb hid scancodes
 
@@ -24,6 +26,7 @@ macro_attr!
 		Equals,
 		LeftBracket,
 		RightBracket,
+		#[serde(rename = "us_backslash")]
 		USBackslash,
 		HashTilde,
 		Semicolon,

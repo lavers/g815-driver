@@ -1,0 +1,166 @@
+profiles:
+    default:
+        theme: default
+        game_mode_keys:
+           - down
+        gkeys:
+            1:
+                run_command: /home/sam/bin/toggle-headphones
+            2:
+                run_command: /home/sam/bin/set-brightness prompt
+        modes:
+            1:
+                theme: toast
+                gkeys:
+                    3: macro-name
+
+    tmux:
+        conditions:
+            executable: "/konsole$"
+            title: "tmux"
+        theme: default
+        gkeys:
+            1: toggle_message_every_second
+            2: hold_message_every_second
+            3: repeat_message_every_second
+            4: single_message_every_second
+            5:
+                dbus_method_call:
+                    destination: org.flameshot.Flameshot
+                    path: /
+                    interface: org.flameshot.Flameshot
+                    method: captureScreen
+
+    spotify:
+        conditions:
+            class_name: "spotify"
+        theme: spotify
+
+gkey_sets:
+    clipboard_shortcuts:
+        1:
+            key_press: "ctrl+x"
+        2:
+            key_press: "ctrl+c"
+        3:
+            key_press: "ctrl+v"
+    tab_navigation:
+        4:
+            key_press: "ctrl+tab"
+        5:
+            key_press: "ctrl+shift+tab"
+
+macros:
+
+    click_every_second:
+        activation_type: toggle
+        steps:
+            - action:
+                  mouse_click: left
+              duration: 20
+            - action: delay
+              duration: 1000
+
+    toggle_message_every_second:
+        activation_type: toggle
+        steps:
+            - action:
+                  debug_print: "toggle macro has run"
+              duration: 0
+            - action: delay
+              duration: 1000
+
+    hold_message_every_second:
+        activation_type: hold_to_repeat
+        steps:
+            - action:
+                  debug_print: "hold to repeat macro has run"
+              duration: 0
+            - action: delay
+              duration: 1000
+
+    repeat_message_every_second:
+        activation_type:
+            repeat: 3
+        steps:
+            - action:
+                  debug_print: "repeat macro has run"
+              duration: 0
+            - action: delay
+              duration: 1000
+
+    single_message_every_second:
+        activation_type: singular
+        steps:
+            - action:
+                  debug_print: "single macro has run"
+              duration: 0
+            - action: delay
+              duration: 1000
+
+    tmux_next_pane:
+        activation_type: singular
+        steps:
+            - action:
+                  key_press: ctrl+n
+              duration: 20
+
+themes:
+    default:
+        - color: 00bbff
+          keys:
+            - keygroup: main
+        - color: ff0000
+          keys:
+            - keygroup: gkeys
+        - color: ff4d00
+          keys:
+            - keygroup: fkeys
+            - keygroup: controlkeys
+        - color: ff00ff
+          keys:
+            - keygroup: numpad
+        - color: 00ff00
+          keys:
+            - keygroup: arrows
+        - color: ffeb00
+          keys:
+            - keygroup: mediakeys
+            - single: light
+        - color: ff0000
+          keys:
+            - single: delete
+    effect:
+        type: color_wave
+        color: ff00ff
+        direction: vertical
+        duration: 4000
+        brightness: 100
+    tmux:
+        - color: 00ffff
+          keys:
+            - keygroup: main
+        - color: ff0000
+          keys:
+            - keygroup: gkeys
+        - color: ff00ff
+          keys:
+            - keygroup: arrows
+    spotify:
+        - color: 00ff00
+          keys:
+            - keygroup: main
+            - keygroup: mediakeys
+
+keygroups:
+    wasd: [w, a, s, d]
+    letters: [a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p, q, r, s, t, u, v, w, x, y, z]
+    main: [a, b, c, d, e, f, g, h, i, j, k, l, n, m, o, p, q, r, s, t, u, v, w, x, y, z, n1, n2, n3, n4, n5, n6, n7, n8, n9, n0, enter, backspace, tab, space, minus, equals, left_bracket, right_bracket, backslash, us_backslash, hash_tilde, semicolon, apostrophe, grave, comma, dot, slash, caps_lock, left_control, left_shift, left_alt, left_meta, right_control, right_shift, right_alt, right_meta, context_menu]
+    numbers: [n1, n2, n3, n4, n5, n6, n7, n8, n9, n0]
+    fkeys: [escape, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12]
+    gkeys: [g1, g2, g3, g4, g5]
+    numpad: [num_lock, numpad_divide, numpad_multiply, numpad_minus, numpad_plus, numpad_enter, numpad1, numpad2, numpad3, numpad4, numpad5, numpad6, numpad7, numpad8, numpad9, numpad0, numpad_dot]
+    mediakeys: [mute, media_previous, media_next, media_play_pause]
+    arrows: [up, down, left, right]
+    modifiers: [left_control, left_shift, left_alt, left_meta, right_control, right_shift, right_alt, right_meta, context_menu]
+    controlkeys: [print_screen, scroll_lock, pause, insert, home, page_up, delete, end, page_down]

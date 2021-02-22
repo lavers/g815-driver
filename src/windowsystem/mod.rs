@@ -1,25 +1,22 @@
 use std::time::Duration;
 use std::env;
-use std::sync::Arc;
-use std::sync::mpsc::{Sender, Receiver};
+use std::sync::mpsc::{Sender, Receiver, TryRecvError};
 use std::fmt;
 
 use serde::{Serialize, Deserialize};
 
-use crate::{SharedState, MainThreadSignal};
+use crate::MainThreadSignal;
 use crate::config::ActiveWindowConditions;
 
 mod x11;
 // TODO support wayland?
 
 #[derive(Copy, Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum MouseButton
 {
-	#[serde(rename = "left")]
 	Left,
-	#[serde(rename = "middle")]
 	Middle,
-	#[serde(rename = "right")]
 	Right
 }
 
@@ -28,6 +25,13 @@ pub enum WindowSystemError
 {
 	NotSupported,
 	NotDetected
+}
+
+pub enum WindowSystemSignal
+{
+	Shutdown,
+	SendClick(MouseButton),
+	SendKeyCombo(String)
 }
 
 pub trait WindowSystem where Self: Send
@@ -68,17 +72,28 @@ impl dyn WindowSystem where Self: Send
 		self.send_mouse_button(button, false);
 	}
 
-	pub fn active_window_watcher(
-		state: Arc<SharedState>, 
-		rx: Receiver<()>, 
+	pub fn event_loop(
+		&self,
+		rx: Receiver<WindowSystemSignal>,
 		tx: Sender<MainThreadSignal>)
 	{
 		let mut last_active_window = None;
 
 		// receiving anything should be interpreted as a shutdown event
-		while rx.try_recv().is_err()
+		loop
 		{
-			let active_window = state.window_system.lock().unwrap().active_window_info();
+			match rx.try_recv()
+			{
+				Ok(WindowSystemSignal::Shutdown)
+					| Err(TryRecvError::Disconnected) => break,
+
+				Err(TryRecvError::Empty) => (),
+
+				Ok(WindowSystemSignal::SendClick(button)) => self.send_mouse_click(button),
+				Ok(WindowSystemSignal::SendKeyCombo(combo)) => self.send_key_combo_press(&combo)
+			}
+
+			let active_window = self.active_window_info();
 
 			if last_active_window != active_window
 			{

@@ -1,4 +1,4 @@
-use std::sync::mpsc::{Receiver, TryRecvError};
+use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -7,53 +7,29 @@ use std::env;
 
 use serde::{Serialize, Deserialize};
 
-use crate::SharedState;
-use crate::windowsystem::MouseButton;
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct Macro
-{
-	pub activation_type: ActivationType,
-	pub theme: Option<String>,
-	pub steps: Vec<Step>
-}
-
+use crate::windowsystem::{MouseButton, WindowSystemSignal};
+use crate::dbus::DBusSignal;
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ActivationType
 {
-	#[serde(rename = "singular")]
 	Singular,
-	#[serde(rename = "repeat")]
 	Repeat(u32),
-	#[serde(rename = "hold_to_repeat")]
 	HoldToRepeat,
-	#[serde(rename = "toggle")]
 	Toggle
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct Step
-{
-	action: Action,
-	duration: u64
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Action
 {
-	#[serde(rename = "mouse_click")]
 	MouseClick(MouseButton),
-	#[serde(rename = "key_press")]
 	KeyPress(String),
-	#[serde(rename = "run_command")]
 	RunCommand(String),
-	#[serde(rename = "delay")]
 	Delay,
-	#[serde(rename = "debug_print")]
 	DebugPrint(String),
-	#[serde(rename = "dbus_method_call")]
-	DbusMethodCall 
+	DbusMethodCall
 	{
 		destination: String,
 		path: String,
@@ -63,58 +39,23 @@ pub enum Action
 	}
 }
 
-impl Step
-{
-	fn execute(&self, state: &Arc<SharedState>)
-	{
-		match &self.action
-		{
-			Action::Delay => std::thread::sleep(Duration::from_millis(self.duration)),
-			Action::MouseClick(button) => state.window_system
-				.lock().unwrap().send_mouse_click(*button),
-			Action::KeyPress(keysequence) => state.window_system
-				.lock().unwrap().send_key_combo_press(keysequence),
-			Action::DebugPrint(message) => println!("{}", message),
-			Action::RunCommand(command) => 
-			{
-				Command::new(env::var_os("SHELL").unwrap_or_else(|| "/bin/sh".into()))
-					.arg("-c")
-					.arg(command)
-					.stdin(Stdio::null())
-					.stdout(Stdio::null())
-					.stderr(Stdio::null())
-					.spawn();
-			},
-			Action::DbusMethodCall { destination, path, interface, method, arguments } => 
-			{
-				if let Ok(mut message) = dbus::message::Message::new_method_call(
-					destination, 
-					path, 
-					interface, 
-					method)
-				{
-					use dbus::channel::Sender;
-
-					if let Some(arguments) = arguments
-					{
-						message = message.append1(&arguments);
-					}
-
-					state.dbus.lock().unwrap().send(message);
-				}
-			}
-		};
-	}
-}
-
 pub enum MacroSignal
 {
 	Stop,
 	ResetCount
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Macro
+{
+	pub activation_type: ActivationType,
+	pub theme: Option<String>,
+	pub steps: Vec<Step>
+}
+
 impl Macro
 {
+	/// Convienience function for creating a new single-step macro from a single action
 	pub fn from_action(action: Action) -> Self
 	{
 		Self
@@ -129,6 +70,7 @@ impl Macro
 		}
 	}
 
+	/// Gets the number of times this macro should run (None for unlimited)
 	pub fn execution_count(&self) -> Option<u32>
 	{
 		match self.activation_type
@@ -140,10 +82,15 @@ impl Macro
 		}
 	}
 
-	pub fn execution_thread(
-		self,
-		state: Arc<SharedState>, 
+	/// Executes the macro by running all of it's steps in turn.
+	///
+	/// The macro will run until it's configured `execution_count()` is reached
+	/// at which point is_finished will be set to true.
+	pub fn execute(
+		&self,
 		rx: Receiver<MacroSignal>,
+		window_system: Sender<WindowSystemSignal>,
+		dbus: Sender<DBusSignal>,
 		is_finished: Arc<AtomicBool>)
 	{
 		let mut count = self.execution_count();
@@ -155,17 +102,70 @@ impl Macro
 
 			self.steps
 				.iter()
-				.for_each(|step| step.execute(&state));
+				.for_each(|step| step.execute(&window_system, &dbus));
 
 			match rx.try_recv()
 			{
 				Ok(MacroSignal::ResetCount) => count = self.execution_count(),
-				Ok(MacroSignal::Stop) 
+				Ok(MacroSignal::Stop)
 					| Err(TryRecvError::Disconnected) => break,
 				Err(TryRecvError::Empty) => ()
 			}
 		}
 
 		is_finished.store(true, Ordering::Relaxed);
+	}
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Step
+{
+	action: Action,
+	duration: u64
+}
+
+impl Step
+{
+	fn execute(&self, window_system: &Sender<WindowSystemSignal>, dbus: &Sender<DBusSignal>)
+	{
+		match &self.action
+		{
+			Action::Delay => std::thread::sleep(Duration::from_millis(self.duration)),
+
+			Action::MouseClick(button) => window_system
+				.send(WindowSystemSignal::SendClick(*button))
+				.unwrap_or(()),
+
+			Action::KeyPress(keysequence) => window_system
+				.send(WindowSystemSignal::SendKeyCombo(keysequence.clone()))
+				.unwrap_or(()),
+
+			Action::DebugPrint(message) => println!("{}", message),
+
+			Action::RunCommand(command) =>
+			{
+				Command::new(env::var_os("SHELL").unwrap_or_else(|| "/bin/sh".into()))
+					.arg("-c")
+					.arg(command)
+					.stdin(Stdio::null())
+					.stdout(Stdio::null())
+					.stderr(Stdio::null())
+					.spawn();
+			},
+
+			Action::DbusMethodCall { destination, path, interface, method, arguments } =>
+			{
+				if let Ok(message) = zbus::Message::method(
+					None,
+					Some(destination),
+					path,
+					Some(interface),
+					method,
+					arguments)
+				{
+					dbus.send(DBusSignal::SendMessage(message));
+				}
+			}
+		};
 	}
 }

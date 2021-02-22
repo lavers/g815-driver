@@ -4,7 +4,7 @@
 #![recursion_limit="512"]
 #![allow(clippy::suspicious_else_formatting)]
 
-use std::sync::{Arc, RwLock, Mutex};
+use std::sync::{Arc, RwLock};
 use std::sync::mpsc::channel;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -16,42 +16,48 @@ use threadpool::ThreadPool;
 use notify::{Watcher, watcher};
 use log::{error, info, debug, trace};
 use crossbeam::channel::unbounded;
+use clap::{Arg, App};
 
 use config::Configuration;
 use windowsystem::{WindowSystem, ActiveWindowInfo};
 use device::thread::DeviceThreadSignal;
 
 mod windowsystem;
-mod dbusserver;
+mod dbus;
 mod device;
 mod config;
 mod macros;
+mod media;
 
 pub struct SharedState
 {
-	// don't need a rwlock on window_system as it maintains
-	// it's own mutex for thread safety
-	window_system: Mutex<Box<dyn WindowSystem>>,
 	config: RwLock<Configuration>,
-	dbus: Mutex<dbus::blocking::Connection>,
 	macro_recording: AtomicBool,
-	active_profile: RwLock<config::Profile>
+	active_profile: RwLock<config::Profile>,
+	media_state: RwLock<media::MediaState>
 }
 
 pub enum MainThreadSignal
 {
 	ActiveWindowChanged(Option<ActiveWindowInfo>),
-	RunMacroInPool(Box<dyn FnOnce() + Send>)
+	RunMacroInPool(Box<dyn FnOnce() + Send>),
+	MediaStateChanged(media::MediaState)
 }
 
 fn main()
 {
 	pretty_env_logger::init();
 
+	let args = App::new("g815-driver")
+		.version(env!("CARGO_PKG_VERSION"))
+		.author(env!("CARGO_PKG_AUTHORS"))
+		.about(env!("CARGO_PKG_DESCRIPTION"))
+		.arg(Arg::with_name("palette")
+			 .short("p"))
+		.get_matches();
+
 	let config = Configuration::load().unwrap();
 	let hidapi = HidApi::new().unwrap();
-	let window_system = WindowSystem::new().unwrap();
-	let dbus = dbus::blocking::Connection::new_session().unwrap();
 	// shouldnt ever need more than 20 threads, as that can handle all
 	// 15 possible simultaneous macros + the device/watcher threads
 	let pool = ThreadPool::new(20);
@@ -95,21 +101,23 @@ fn main()
         .collect();
 
 	let initial_profile = config.default_profile().clone();
+
+	let (dbus_thread_tx, dbus_thread_rx) = channel();
+
 	let state = Arc::new(SharedState
 	{
-		window_system: Mutex::new(window_system),
-		dbus: Mutex::new(dbus),
 		macro_recording: AtomicBool::new(false),
 		config: RwLock::new(config),
-		active_profile: RwLock::new(initial_profile)
+		active_profile: RwLock::new(initial_profile),
+		media_state: RwLock::new(media::MediaState::default())
 	});
 
 	let should_exit = Arc::new(AtomicBool::new(false));
 	let (main_thread_tx, main_thread_rx) = channel();
 	let (device_thread_tx, device_thread_rx) = unbounded();
 	let (ww_thread_tx, ww_thread_rx) = channel();
-	let (dbus_thread_tx, dbus_thread_rx) = channel();
 	let (config_watcher_tx, config_watcher_rx) = channel();
+	let (media_watcher_tx, media_watcher_rx) = channel();
 
 	let mut config_watcher = watcher(config_watcher_tx, Duration::from_secs(3)).unwrap();
 	let mut config_file = Configuration::config_file_location();
@@ -125,34 +133,90 @@ fn main()
 		move || should_exit.store(true, Ordering::Relaxed)
 	});
 
-	pool.execute(
+	if args.is_present("palette")
 	{
-		let state = Arc::clone(&state);
-		let main_thread_tx = main_thread_tx.clone();
-		move || dbusserver::Server::new(state, main_thread_tx, dbus_thread_rx).event_loop()
-	});
 
-	pool.execute(
+		let mut current = hsl::HSL { h: 0_f64, s: 1_f64, l: 0.5_f64 };
+
+		ncurses::initscr();
+		ncurses::addstr(format!("you're in color palette (tester) mode.\n").as_str());
+		ncurses::addstr(format!("Press h/l to decrease/increase hue by 1 (capital for 10), q to quit.\n\n").as_str());
+		ncurses::refresh();
+
+		let mut devices = devices;
+		let mut kb = devices.pop().unwrap();
+		kb.take_control();
+
+		loop
+		{
+			let color = current.into();
+			kb.set_all(color);
+			kb.commit();
+
+			ncurses::addstr(format!("\rCurrent hue: {}deg (#{:x})", current.h, color).as_str());
+
+			match ncurses::getch() as u8 as char
+			{
+				'h' => current.h -= 1_f64,
+				'H' => current.h -= 10_f64,
+				'l' => current.h += 1_f64,
+				'L' => current.h += 10_f64,
+				'q' => break,
+				_ => ()
+			};
+		}
+
+		ncurses::endwin();
+		kb.release_control();
+		should_exit.store(true, Ordering::Relaxed)
+	}
+	else
 	{
-		let state = Arc::clone(&state);
-		let main_thread_tx = main_thread_tx.clone();
-		move || WindowSystem::active_window_watcher(state, ww_thread_rx, main_thread_tx)
-	});
+		pool.execute(
+		{
+			let main_thread_tx = main_thread_tx.clone();
+			move || dbus::Server::new(main_thread_tx, dbus_thread_rx).run()
+		});
 
-    for device in devices
-    {
-        pool.execute(
-        {
-            let state = Arc::clone(&state);
-            let main_thread_tx = main_thread_tx.clone();
-            let device_thread_rx = device_thread_rx.clone();
-            move || device::thread::DeviceThread::new(device, state, main_thread_tx)
-                .event_loop(device_thread_rx)
-        });
-    }
+		pool.execute(
+		{
+			let main_thread_tx = main_thread_tx.clone();
+			let window_system = WindowSystem::new().unwrap();
+			move || window_system.event_loop(ww_thread_rx, main_thread_tx)
+		});
+
+		pool.execute(
+		{
+			let main_thread_tx = main_thread_tx.clone();
+			move || media::MediaWatcher::new()
+				.unwrap()
+				.run(media_watcher_rx, main_thread_tx)
+		});
+
+		for device in devices
+		{
+			pool.execute(
+			{
+				let state = Arc::clone(&state);
+				let main_thread_tx = main_thread_tx.clone();
+				let device_thread_rx = device_thread_rx.clone();
+				let dbus_thread_tx = dbus_thread_tx.clone();
+				let ww_thread_tx = ww_thread_tx.clone();
+				move || device::thread::DeviceThread::new(
+					device,
+					state,
+					dbus_thread_tx,
+					ww_thread_tx,
+					main_thread_tx)
+					.event_loop(device_thread_rx)
+			});
+		}
+	}
 
 	info!("ready!");
 	debug!("startup complete, now in main event loop");
+
+	let mut last_active_window = None;
 
 	while !should_exit.load(Ordering::Relaxed)
 	{
@@ -161,28 +225,34 @@ fn main()
 		match config_watcher_rx.try_recv()
 		{
 			Ok(notify::DebouncedEvent::NoticeRemove(_path)) => (),
-			Ok(event) =>
+			Ok(notify::DebouncedEvent::Create(path))
+				| Ok(notify::DebouncedEvent::NoticeWrite(path)) =>
 			{
-				trace!("file watch event on config.yaml: {:#?}", &event);
-				info!("configuration file was changed, will reload");
-
-				match Configuration::load()
+				if let Some(file_name) = path.file_name()
 				{
-					Ok(new_config) =>
+					if file_name == "config.yml"
 					{
-						info!("new config loaded OK, notifying devices");
-						*(state.config.write().unwrap()) = new_config;
-						device_thread_tx.send(DeviceThreadSignal::ConfigurationReloaded);
-						let active_window = state.window_system.lock().unwrap().active_window_info();
-						main_thread_tx.send(MainThreadSignal::ActiveWindowChanged(active_window));
-					},
-					Err(config_error) => error!("new configuration cannot be loaded: {}", &config_error)
+						info!("configuration file was changed, will reload");
+
+						match Configuration::load()
+						{
+							Ok(new_config) =>
+							{
+								info!("new config loaded OK, notifying devices");
+								*(state.config.write().unwrap()) = new_config;
+								device_thread_tx.send(DeviceThreadSignal::ConfigurationReloaded);
+								main_thread_tx.send(MainThreadSignal::ActiveWindowChanged(
+									last_active_window.clone()));
+							},
+							Err(config_error) => error!("new configuration cannot be loaded: {}", &config_error)
+						}
+					}
 				}
 			},
 			_ => ()
 		}
 
-        if let Ok((client_stream, _address)) = socket.accept()
+        if let Ok((_client_stream, _address)) = socket.accept()
         {
 
         }
@@ -192,6 +262,13 @@ fn main()
 			match signal
 			{
 				MainThreadSignal::RunMacroInPool(closure) => pool.execute(closure),
+				MainThreadSignal::MediaStateChanged(new) =>
+				{
+					let mut current = state.media_state.write().unwrap();
+					debug!("media state changed: {:?} => {:?}", &current, &new);
+					*current = new;
+					device_thread_tx.send(DeviceThreadSignal::MediaStateChanged);
+				},
 				MainThreadSignal::ActiveWindowChanged(active_window) =>
 				{
 					let config = &state.config.read().unwrap();
@@ -202,12 +279,14 @@ fn main()
 						   &profile);
 					info!("active window has changed\n\twindow: {}\n\tapplying profile: {}",
 						  active_window
+							.as_ref()
 							.map(|window| format!("{}", window))
 							.unwrap_or_else(|| "[no active window]".into()),
 						  &name);
 
 					*(state.active_profile.write().unwrap()) = profile.clone();
 					device_thread_tx.send(DeviceThreadSignal::ProfileChanged);
+					last_active_window = active_window;
 				}
 			}
 		}
@@ -216,8 +295,9 @@ fn main()
 	debug!("notifying threads of shutdown");
 
 	device_thread_tx.send(DeviceThreadSignal::Shutdown);
-	ww_thread_tx.send(());
-	dbus_thread_tx.send(());
+	ww_thread_tx.send(windowsystem::WindowSystemSignal::Shutdown);
+	dbus_thread_tx.send(dbus::DBusSignal::Shutdown);
+	media_watcher_tx.send(media::MediaWatcherSignal::Shutdown);
 	pool.join();
 
 	debug!("threadpool shutdown");
