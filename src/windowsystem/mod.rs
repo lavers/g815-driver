@@ -4,6 +4,7 @@ use std::sync::mpsc::{Sender, Receiver, TryRecvError};
 use std::fmt;
 
 use serde::{Serialize, Deserialize};
+use log::debug;
 
 use crate::MainThreadSignal;
 use crate::config::ActiveWindowConditions;
@@ -72,7 +73,7 @@ impl dyn WindowSystem where Self: Send
 		self.send_mouse_button(button, false);
 	}
 
-	pub fn event_loop(
+	pub fn run(
 		&self,
 		rx: Receiver<WindowSystemSignal>,
 		tx: Sender<MainThreadSignal>)
@@ -97,6 +98,11 @@ impl dyn WindowSystem where Self: Send
 
 			if last_active_window != active_window
 			{
+				debug!(
+					"active window has changed: {:?} => {:?}",
+					&last_active_window,
+					&active_window);
+
 				tx.send(MainThreadSignal::ActiveWindowChanged(active_window.clone()));
 				last_active_window = active_window;
 			}
@@ -172,7 +178,7 @@ impl fmt::Display for ActiveWindowInfo
 	{
 		write!(formatter,
 			"[{}] {}",
-			self.class.as_ref().map(|s| s.as_str()).unwrap_or("unknown class"),
-			self.title.as_ref().map(|s| s.as_str()).unwrap_or("no title"))
+			self.class.as_deref().unwrap_or("unknown class"),
+			self.title.as_deref().unwrap_or("no title"))
 	}
 }

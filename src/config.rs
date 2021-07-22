@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::borrow::Cow;
 use std::fmt;
 
 use serde::{Serialize, Deserialize, Serializer, Deserializer, de::Error};
@@ -51,15 +52,15 @@ pub enum MacroKeyAssignment
 
 impl MacroKeyAssignment
 {
-	pub fn expand(&self, config: &Configuration) -> Option<Macro>
+	pub fn expand<'a>(&'a self, config: &'a Configuration) -> Option<Cow<'a, Macro>>
 	{
 		match self
 		{
-			Self::SimpleAction(action) => Some(Macro::from_action(action.clone())),
+			Self::SimpleAction(action) => Some(Cow::Owned(Macro::from_action(action.clone()))),
 			Self::NamedMacro(macro_name) => config.macros
 				.as_ref()
 				.and_then(|macros| macros.get(macro_name))
-				.cloned()
+				.map(|_macro| Cow::Borrowed(_macro))
 		}
 	}
 }
@@ -157,18 +158,38 @@ impl ProfileKeyAssignment for ModeProfile
 
 impl Configuration
 {
-	pub fn config_file_location() -> PathBuf
+	pub const fn config_filename() -> &'static str
 	{
-		// TODO use xdg_config_dir for non-debug builds
+		"config.yml"
+	}
 
-		let mut path = PathBuf::new();
-		path.push("config.yml");
-		std::fs::canonicalize(path).unwrap()
+	pub fn config_folder() -> PathBuf
+	{
+		let mut config_home = std::env::var("XDG_CONFIG_HOME").unwrap_or_else(|_| "".to_string());
+
+		if config_home.is_empty()
+		{
+			let home = std::env::var("HOME").expect("$XDG_CONFIG_HOME is not defined, and \
+				neither is $HOME. No idea where to find your config.yml file!");
+			config_home = format!("{}/.config", home);
+		}
+
+		let mut path = PathBuf::from(config_home);
+		path.push("g815d");
+		std::fs::canonicalize(path)
+			.expect("unable to convert config file location to an absolute path")
+	}
+
+	pub fn file_path() -> PathBuf
+	{
+		let mut path = Self::config_folder();
+		path.push(Self::config_filename());
+		path
 	}
 
 	pub fn load() -> Result<Self, ConfigError>
 	{
-		std::fs::read_to_string(Self::config_file_location())
+		std::fs::read_to_string(Self::file_path())
 			.map_err(ConfigError::UnableToOpen)
 			.and_then(|yaml_string| serde_yaml::from_str(&yaml_string)
 				.map_err(ConfigError::ParseError))
@@ -188,7 +209,7 @@ impl Configuration
 	{
 		serde_yaml::to_string(self)
 			.map_err(ConfigError::SerializeError)
-			.and_then(|yaml_string| std::fs::write(Self::config_file_location(), yaml_string)
+			.and_then(|yaml_string| std::fs::write(Self::file_path(), yaml_string)
 				.map_err(ConfigError::UnableToWrite))
 	}
 
@@ -241,7 +262,8 @@ impl Profile
 			.unwrap_or_else(|| config.default_theme())
 	}
 
-	pub fn macro_for_gkey(&self, config: &Configuration, mode: u8, gkey: u8) -> Option<Macro>
+	pub fn macro_for_gkey<'a>(&'a self, config: &'a Configuration, mode: u8, gkey: u8)
+		-> Option<Cow<'a, Macro>>
 	{
 		self.modes
 			.as_ref()

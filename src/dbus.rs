@@ -28,8 +28,8 @@ pub enum DBusSignal
 
 pub struct Server
 {
-	tx: Sender<MainThreadSignal>,
 	rx: Receiver<DBusSignal>,
+	tx: Sender<MainThreadSignal>,
 	proxy: DBusProxy<'static>,
 	connection: Connection,
 	server: ObjectServer<'static>
@@ -40,7 +40,7 @@ impl Server
 	const BUS_NAME: &'static str = "rs.lave.g815_driver";
 	const BUS_PATH: &'static str = "/rs/lave/g815_driver";
 
-	pub fn new(tx: Sender<MainThreadSignal>, rx: Receiver<DBusSignal>) -> Self
+	pub fn new(rx: Receiver<DBusSignal>, tx: Sender<MainThreadSignal>) -> Self
 	{
 		let handshake = zbus::handshake::ClientHandshake::new_session_nonblock().unwrap();
 		let authenticated_socket = handshake.blocking_finish().unwrap();

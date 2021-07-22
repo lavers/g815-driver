@@ -89,7 +89,7 @@ pub struct G815Keyboard
 
 impl G815Keyboard
 {
-	pub fn new(device: HidDevice) -> Box<dyn super::Device>
+	pub fn init(device: HidDevice) -> Box<dyn super::Device>
 	{
 		let mut keyboard = G815Keyboard
 		{
@@ -115,13 +115,13 @@ impl G815Keyboard
 
 	fn write(&mut self, command: u16, data: &[u8]) -> CommandResult<Vec<u8>>
 	{
-		let command_bytes = command as u16;
+		let mut buffer = vec![
+			0x11,
+			0xff,
+			(command >> 8) as u8,
+			command as u8
+		];
 
-		let mut buffer = Vec::new();
-		buffer.push(0x11);
-		buffer.push(0xff);
-		buffer.push((command_bytes >> 8) as u8);
-		buffer.push(command_bytes as u8);
 		buffer.extend(data);
 		buffer.resize(20, 0);
 
@@ -208,8 +208,7 @@ impl G815Keyboard
 
 		let capabilities = capabilities
 			.iter()
-			.map(|capability| self.load_capability_data(*capability).map(|_| ()))
-			.collect();
+			.try_for_each(|capability| self.load_capability_data(*capability).map(|_| ()));
 
 		trace!("capability id cache: {:#0x?}", &self.capability_id_cache);
 		capabilities
@@ -462,7 +461,7 @@ impl super::Device for G815Keyboard
 
 	fn set_4(&mut self, keys: &[(Scancode, Color)]) -> CommandResult<()>
 	{
-		keys.chunks(4).map(|keys|
+		keys.chunks(4).try_for_each(|keys|
 		{
 			let mut data: Vec<u8> = keys
 				.iter()
@@ -477,7 +476,6 @@ impl super::Device for G815Keyboard
 
 			self.execute(Command::Set4, &data).map(|_| ())
 		})
-		.collect()
 	}
 
 	fn set_13(&mut self, color: Color, keys: &[Scancode]) -> CommandResult<()>
@@ -487,18 +485,15 @@ impl super::Device for G815Keyboard
 		data[1] = color.g;
 		data[2] = color.b;
 
-		keys
-			.chunks(13)
-			.map(|chunk|
-			{
-				chunk
-					.iter()
-					.enumerate()
-					.for_each(|(i, scancode)| data[i + 3] = scancode.rgb_id());
+		keys.chunks(13).try_for_each(|chunk|
+		{
+			chunk
+				.iter()
+				.enumerate()
+				.for_each(|(i, scancode)| data[i + 3] = scancode.rgb_id());
 
-				self.execute(Command::Set13, &data).map(|_| ())
-			})
-			.collect()
+			self.execute(Command::Set13, &data).map(|_| ())
+		})
 	}
 
 	fn commit(&mut self) -> CommandResult<()>
@@ -629,8 +624,9 @@ impl super::Device for G815Keyboard
 			})
 			.collect::<Vec<u8>>()
 			.chunks(15) // last byte always seems to be 00 even if there are more than 15
-			.map(|scancodes| self.write(Command::GameModeAddKeys as u16, scancodes).map(|_| ()))
-			.collect()
+			.try_for_each(|scancodes| self
+				.write(Command::GameModeAddKeys as u16, scancodes)
+				.map(|_| ()))
 	}
 
 	fn reset_game_mode_keys(&mut self) -> CommandResult<()>

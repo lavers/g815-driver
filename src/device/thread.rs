@@ -19,7 +19,7 @@ use super::{Device, DeviceEvent, KeyType, MediaKey};
 
 type MacroState = (Sender<MacroSignal>, Arc<AtomicBool>, ActivationType);
 
-pub enum DeviceThreadSignal
+pub enum DeviceSignal
 {
 	Shutdown,
 	ProfileChanged,
@@ -82,8 +82,7 @@ impl DeviceThread
 		}
 	}
 
-	fn current_mode_macro_states<'a>(&'a mut self)
-		-> &'a mut HashMap<u8, MacroState>
+	fn current_mode_macro_states(&mut self) -> &mut HashMap<u8, MacroState>
 	{
 		self.macro_states.entry(self.active_mode).or_default()
 	}
@@ -93,7 +92,9 @@ impl DeviceThread
 		let config = self.state.config.read().unwrap();
 		let current_profile = self.state.active_profile.read().unwrap();
 
-		current_profile.macro_for_gkey(&config, self.active_mode, gkey_number)
+		current_profile
+			.macro_for_gkey(&config, self.active_mode, gkey_number)
+			.map(|macro_| macro_.into_owned())
 	}
 
 	fn last_color_for_scancode(&self, scancode: Scancode) -> Color
@@ -114,7 +115,7 @@ impl DeviceThread
 	///    - Poll for events from the device, then handle them
 	///    - Handle any signals from other threads
 	///    - Update indicators on the keyboard as a result of any state changes
-	pub fn event_loop(&mut self, rx: Receiver<DeviceThreadSignal>)
+	pub fn event_loop(&mut self, rx: Receiver<DeviceSignal>)
 	{
 		self.device.take_control();
 
@@ -130,10 +131,10 @@ impl DeviceThread
 				Err(TryRecvError::Empty) => (),
 
 				Err(TryRecvError::Disconnected)
-					| Ok(DeviceThreadSignal::Shutdown) => break,
+					| Ok(DeviceSignal::Shutdown) => break,
 
-				Ok(DeviceThreadSignal::ConfigurationReloaded)
-					| Ok(DeviceThreadSignal::ProfileChanged) =>
+				Ok(DeviceSignal::ConfigurationReloaded)
+					| Ok(DeviceSignal::ProfileChanged) =>
 				{
 					self.blink_timer = Self::BLINK_DELAY;
 					self.stop_and_remove_all_macros();
@@ -142,11 +143,11 @@ impl DeviceThread
 					self.device.commit();
 				},
 
-				Ok(DeviceThreadSignal::MediaStateChanged) =>
+				Ok(DeviceSignal::MediaStateChanged) =>
 				{
 					use crate::media::PlayerStatus;
 
-					let media_state = { self.state.media_state.read().unwrap().clone() };
+					let media_state = { *self.state.media_state.read().unwrap() };
 					let no_media = media_state.player_status == PlayerStatus::NoMedia;
 					let red = Color::new(255, 0, 0);
 
@@ -238,12 +239,12 @@ impl DeviceThread
 			{
 				assignments
 					.entry(*color)
-					.or_insert(Vec::new())
+					.or_insert_with(Vec::new)
 					.push(*scancode);
 			}
 
-			let assignments = assignments.drain().collect();
-			self.device.apply_scancode_assignments(&assignments);
+			let assignments: ScancodeAssignments = assignments.drain().collect();
+			self.device.apply_scancode_assignments(assignments.as_ref());
 		}
 	}
 

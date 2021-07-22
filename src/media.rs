@@ -117,7 +117,7 @@ impl MediaWatcher
 		trace!("connecting to pulse");
 
 		self.pulse_context.connect(None, FlagSet::NOFLAGS, None)
-			.map_err(|e| e.to_string().unwrap_or("unknown error".to_string()))?;
+			.map_err(|e| e.to_string().unwrap_or_else(|| "unknown error".to_string()))?;
 
 		loop
 		{
@@ -147,8 +147,8 @@ impl MediaWatcher
 			.and_then(|service_names| service_names
 				.iter()
 				.find(|service_name| self.mpris_players_regex.is_match(service_name))
-				.map(|s| s.clone())
-				.ok_or("no loaded media players found on dbus".to_string()))
+				.cloned()
+				.ok_or_else(|| "no loaded media players found on dbus".to_string()))
 			.and_then(|player_service|
 			{
 				let proxy = MediaPlayer2PlayerProxy::new_for(

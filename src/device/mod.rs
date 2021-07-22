@@ -1,8 +1,9 @@
 use serde::{Serialize, Deserialize};
 
 use scancode::Scancode;
-use rgb::{ScancodeAssignments, EffectConfiguration, EffectGroup};
+use rgb::{EffectConfiguration, EffectGroup};
 use color::Color;
+use log::{error, info};
 
 pub mod g815;
 pub mod scancode;
@@ -85,6 +86,39 @@ pub enum CommandError
 	Failure(String)
 }
 
+pub fn find_devices(hidapi: hidapi::HidApi) -> Vec<Box<dyn Device>>
+{
+    hidapi
+        .device_list()
+		.filter_map(|dev|
+		{
+			let initializer: Option<&dyn Fn(hidapi::HidDevice) -> Box<dyn Device>> =
+				match (dev.vendor_id(), dev.product_id(), dev.interface_number())
+				{
+					(0x046d, 0xc33f, 1) => Some(&g815::G815Keyboard::init),
+					_ => None
+				};
+
+			let device_name = dev.product_string().unwrap_or("unknown");
+
+			initializer
+				.and_then(|initializer| dev
+					.open_device(&hidapi)
+					.map_err(|e|
+					{
+						error!("Failed to open target device '{}': {:?}", &device_name, e);
+					})
+					.map(|device|
+					{
+						let mut device = initializer(device);
+						info!("Successfully opened '{}'\n{}", &device_name, device.firmware_info());
+						device
+					})
+					.ok())
+		})
+        .collect()
+}
+
 pub trait Device where Self: std::fmt::Display + Send
 {
 	fn take_control(&mut self) -> CommandResult<()>;
@@ -107,7 +141,7 @@ pub trait Device where Self: std::fmt::Display + Send
 		self.set_mode_leds(1 << (mode - 1))
 	}
 
-	fn apply_scancode_assignments(&mut self, color_map: &ScancodeAssignments)
+	fn apply_scancode_assignments(&mut self, color_map: &[(Color, Vec<Scancode>)])
 	{
 		for (color, scancodes) in color_map.iter()
 		{
@@ -132,3 +166,4 @@ pub trait Device where Self: std::fmt::Display + Send
 		self.set_13(color, &Scancode::iter_variants().collect::<Vec<Scancode>>())
 	}
 }
+

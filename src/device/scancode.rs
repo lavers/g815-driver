@@ -27,7 +27,7 @@ macro_attr!
 		LeftBracket,
 		RightBracket,
 		#[serde(rename = "us_backslash")]
-		USBackslash,
+		UsBackslash,
 		HashTilde,
 		Semicolon,
 		Apostrophe,
@@ -106,9 +106,7 @@ impl Scancode
 	pub fn _gkey_number(&self) -> Option<u8>
 	{
 		let val = *self as u8;
-
-		(val >= 0xb4 && val <= 0xbb)
-			.then_some(val - 0xb3)
+		(0xb4..=0xbb).contains(&val).then_some(val - 0xb3)
 	}
 
 	pub fn rgb_id(&self) -> u8

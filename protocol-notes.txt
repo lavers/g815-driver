@@ -1,8 +1,19 @@
-----------------------------------------------------------------------
-| basic structure
-----------------------------------------------------------------------
+#  G815 USB Protocol Notes
+## Basic Structure
+As a general rule all packets are 20 bytes, apart from some interrupts which vary in size. The 2 byte command number is generally composed of a 1 byte feature id followed by a 4 bit command, then a 4 bit session nibble. All commands follow the basic structure:
+```
+0x11 0xff [2 byte command number] [args]
+```
+At the start of a session, ghub sends an initializer / "session nibble" which is then used as the last nibble of the 2 byte command for most commands. This is sent as ``0x11 0xff 0x00 0x1[a-f]`` where a-f is selected seemingly at random. Then for future commands that use the nibble, the command should be ``command & 0xfff[the session nibble] | 0x000[the session nibble]``
 
-11 ff [2 byte command number] [args]
+## Commands
+### Set Mode Leds
+This sets the state of all 3 mode leds from the bitmask (all 3 can be on/off at the same time)
+```
+0x11 0xff 0x0b 0x1a [bitmask]
+```
+
+## Interrupts
 
 ----------------------------------------------------------------------
 | high confidence
@@ -276,3 +287,4 @@ fixed
 ----------------------
 0f 1a 01 01 [r] [g] [b] 02 (00){6} 01 (00){3}
 0f 1a 00 01 [r] [g] [b] 02 (00){6} 01 (00){3}
+
