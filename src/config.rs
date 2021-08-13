@@ -234,7 +234,7 @@ impl Configuration
 					.as_ref()
 					.and_then(|conditions| window
 						.matches_conditions(conditions)
-						.then_some((name.as_str(), profile)))))
+						.then(|| (name.as_str(), profile)))))
 			.unwrap_or_else(|| ("default", self.default_profile()))
 	}
 

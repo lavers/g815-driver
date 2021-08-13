@@ -151,9 +151,9 @@ impl DeviceThread
 					let no_media = media_state.player_status == PlayerStatus::NoMedia;
 					let red = Color::new(255, 0, 0);
 
-					self.set_override(Scancode::Mute, media_state.muted.then_some(red));
-					self.set_override(Scancode::MediaPrevious, no_media.then_some(Color::black()));
-					self.set_override(Scancode::MediaNext, no_media.then_some(Color::black()));
+					self.set_override(Scancode::Mute, media_state.muted.then(|| red));
+					self.set_override(Scancode::MediaPrevious, no_media.then(Color::black));
+					self.set_override(Scancode::MediaNext, no_media.then(Color::black));
 					self.set_override(Scancode::MediaPlayPause, match media_state.player_status
 					{
 						PlayerStatus::Playing => None,
@@ -318,7 +318,7 @@ impl DeviceThread
 					.iter()
 					.filter_map(|(gkey_number, (_tx, stopped, _activation_type))|
 					{
-						let stopped = stopped.load(Ordering::Relaxed).then_some(*gkey_number);
+						let stopped = stopped.load(Ordering::Relaxed).then(|| *gkey_number);
 
 						// if this is the current mode, and the macro is running or stopped,
 						// override the color of the key as appropriate

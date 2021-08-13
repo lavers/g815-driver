@@ -106,7 +106,7 @@ impl Scancode
 	pub fn _gkey_number(&self) -> Option<u8>
 	{
 		let val = *self as u8;
-		(0xb4..=0xbb).contains(&val).then_some(val - 0xb3)
+		(0xb4..=0xbb).contains(&val).then(|| val - 0xb3)
 	}
 
 	pub fn rgb_id(&self) -> u8

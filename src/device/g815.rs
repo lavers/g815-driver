@@ -263,8 +263,7 @@ impl G815Keyboard
 
 		let data_ref = self.capabilities
 			.entry(capability)
-			.insert(capability_data)
-			.into_mut();
+			.or_insert(capability_data);
 
 		Ok(data_ref)
 	}

@@ -1,6 +1,4 @@
-#![feature(entry_insert)]
 #![allow(unused_must_use)]
-#![feature(bool_to_option)]
 #![recursion_limit="512"]
 #![allow(clippy::suspicious_else_formatting)]
 
